@@ -1,0 +1,43 @@
+# Example process contract. This file is DATA, not code — the engine knows nothing about
+# vendors. Swap this YAML + the state fixture and the same harness runs any process.
+runbook: vendor_onboarding
+version: 1
+risk: medium
+
+# Named state queries. Checks may only read through these bindings.
+state:
+  vendor: { provider: memory }
+  docs: { provider: memory }
+  duplicates: { provider: memory }
+
+steps:
+  # Step 1: lightweight intake. Passes for the demo case (at least one doc present).
+  - id: intake_validate
+    description: Confirm the case has at least one document to work from.
+    tools: []
+    postconditions:
+      - check: docs.count >= 1
+
+  # Step 2: the gated write. The precondition demands BOTH required docs; the demo case is
+  # missing the bank letter, so the harness BLOCKS before create_vendor_draft ever runs.
+  - id: prepare_erp_draft
+    description: Create a draft vendor record in the ERP.
+    preconditions:
+      - check: docs.contains_all(["w9", "bank_letter"])
+        else: "required_docs_present=false"
+      - check: vendor.exists == false
+      - check: duplicates.count == 0
+    tools: [create_vendor_draft]
+    approval:
+      required_when: "risk >= medium"
+      prompt: "Create ERP draft for this vendor?"
+    execute:
+      adapter: stub
+      tool: create_vendor_draft
+      # Demo simulation of the tool's state change, so postconditions verify a real write.
+      effect:
+        vendor: { status: "draft" }
+    postconditions:
+      - check: vendor.exists == true
+      - check: vendor.status == "draft"
+    on_fail: halt

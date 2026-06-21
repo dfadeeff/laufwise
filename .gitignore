@@ -1,0 +1,25 @@
+# Local use-case data (private — not part of the OSS primitive)
+use_cases/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Runs / local artifacts
+runs/
+*.sqlite
+*.db
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store

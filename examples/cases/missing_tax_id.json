@@ -1,0 +1,6 @@
+{
+  "_params": { "tax_id": "", "case_id": "case_001", "name": "Acme Supplies LLC" },
+  "vendor": null,
+  "docs": ["w9"],
+  "duplicates": []
+}
