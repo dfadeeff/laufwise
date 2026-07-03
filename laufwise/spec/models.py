@@ -8,7 +8,13 @@ the engine.
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field
+import re
+import warnings
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+# Defined failure modes (CLAUDE.md): halt | retry(n[, backoff]) | goto(step) | compensate(step).
+_ON_FAIL = re.compile(r"^(halt|retry\([^)]*\)|goto\(\w+\)|compensate\(\w+\))$")
 
 
 class CheckSpec(BaseModel):
@@ -26,10 +32,18 @@ class CheckSpec(BaseModel):
 
 
 class StateBinding(BaseModel):
-    """Binds a named state query to a provider. Checks may ONLY read through these."""
+    """Binds a named state query to a provider. Checks may ONLY read through these.
+
+    `query` is provider-specific (e.g. a URL for the http provider), `extract` narrows the
+    response (dotted path into JSON), `params` are template variables for the query. The
+    engine passes all three through to the provider — bindings are data, resolution is the
+    provider's job.
+    """
 
     provider: str = "memory"
     query: str | None = None
+    extract: str | None = None
+    params: dict = Field(default_factory=dict)
 
 
 class ApprovalSpec(BaseModel):
@@ -47,6 +61,17 @@ class ExecuteSpec(BaseModel):
     effect: dict = Field(default_factory=dict)
 
 
+class VerifySpec(BaseModel):
+    """Bounded re-verification of postconditions. Real systems of record are eventually
+    consistent (a calendar write may not be readable for a few seconds); without this, an
+    honest action can be falsely REJECTed. retries=0 (default) checks exactly once. This is
+    NOT `on_fail: retry` — nothing is re-executed, the same postconditions are re-checked
+    against freshly re-resolved state."""
+
+    retries: int = Field(default=0, ge=0)
+    backoff_s: float = Field(default=1.0, ge=0)
+
+
 class StepSpec(BaseModel):
     id: str
     description: str = ""
@@ -55,9 +80,25 @@ class StepSpec(BaseModel):
     approval: ApprovalSpec | None = None
     execute: ExecuteSpec | None = None
     postconditions: list[CheckSpec] = Field(default_factory=list)
+    verify: VerifySpec = Field(default_factory=VerifySpec)
     # Defined failure modes (CLAUDE.md): halt (default) | retry | goto | compensate.
     # v0 implements `halt` only; others parse but are treated as halt with a warning.
     on_fail: str = "halt"
+
+    @field_validator("on_fail")
+    @classmethod
+    def _known_on_fail(cls, v: str) -> str:
+        v = v.strip()
+        if not _ON_FAIL.match(v):
+            raise ValueError(
+                f"on_fail must be halt | retry(...) | goto(step) | compensate(step), got {v!r}"
+            )
+        if v != "halt":
+            warnings.warn(
+                f"on_fail={v!r} is parsed but not implemented in v0 — treated as halt",
+                stacklevel=2,
+            )
+        return v
 
 
 class RunbookSpec(BaseModel):

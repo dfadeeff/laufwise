@@ -1,0 +1,33 @@
+# Booking verification against a REAL calendar API (http provider). The postcondition
+# re-queries the calendar after execution: an agent's "you're all set!" is only accepted if
+# an event actually exists in the system of record.
+runbook: book_interview
+version: 1
+risk: medium
+
+state:
+  slot:
+    provider: http
+    query: "{base}/slots"
+    extract: items.0.free
+  events:
+    provider: http
+    query: "{base}/{events_path}"
+    extract: items
+
+steps:
+  - id: book_slot
+    description: Book the interview slot for the candidate
+    preconditions:
+      - check: slot.exists == true
+        else: "slot is not free — do not book"
+    tools: [calendar.create_event]
+    execute:
+      adapter: stub
+      tool: calendar.create_event
+    postconditions:
+      - check: events.count >= 1
+        else: "no calendar event found — booking claim not verified against the calendar"
+    verify:
+      retries: 2
+      backoff_s: 0.2

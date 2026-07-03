@@ -9,7 +9,7 @@ come next.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from typing import Callable, Protocol, runtime_checkable
 
 from laufwise.spec.models import StepSpec
 
@@ -61,3 +61,31 @@ class SimulatedAdapter:
         if effect and hasattr(self.provider, "apply"):
             self.provider.apply(effect)
         return StepOutcome(ok=True, note=f"applied effect={effect}" if effect else "no effect")
+
+
+class ToolRegistryAdapter:
+    """Executes registered Python tool implementations against the provider-backed store.
+
+    Non-circular by construction: the runbook's declared `effect` is ignored — what lands in
+    state is whatever the tool implementation actually does, and the postcondition re-queries
+    state to find out. An implementation that claims success but writes nothing is REJECTed
+    by the engine, exactly like a real tool whose write did not land.
+    """
+
+    def __init__(self, provider, tools: dict[str, Callable[..., StepOutcome | None]]) -> None:
+        self.provider = provider
+        self.tools = tools
+
+    def execute(self, step: StepSpec, allowlist: list[str]) -> StepOutcome:
+        tool = step.execute.tool if step.execute else None
+        if tool is None:
+            return StepOutcome(ok=True, note="no tool declared")
+        if tool not in allowlist:
+            raise ToolNotAllowed(f"{tool!r} not in step allowlist {allowlist}")
+        impl = self.tools.get(tool)
+        if impl is None:
+            return StepOutcome(ok=False, note=f"no implementation registered for {tool!r}")
+        outcome = impl(self.provider, step)
+        if isinstance(outcome, StepOutcome):
+            return outcome
+        return StepOutcome(ok=True, note=f"executed {tool!r}")

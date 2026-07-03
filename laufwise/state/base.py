@@ -13,6 +13,12 @@ import json
 from typing import Any, Protocol, runtime_checkable
 
 
+class StateUnavailable(Exception):
+    """Raised by a StateProvider when a declared binding cannot be resolved (source down,
+    binding missing from the fixture). The engine turns this into a first-class
+    STATE_UNAVAILABLE halt — it must never masquerade as empty state a check could pass on."""
+
+
 class StateView:
     """A read-only view over one resolved state binding."""
 

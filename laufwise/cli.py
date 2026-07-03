@@ -19,6 +19,8 @@ from laufwise.contract.evaluator import BuiltinEvaluator
 from laufwise.engine.base import StepStatus
 from laufwise.engine.local import LocalEngine
 from laufwise.spec.loader import load_runbook
+from laufwise.state.composite import CompositeStateProvider
+from laufwise.state.http import HttpStateProvider
 from laufwise.state.memory import MemoryStateProvider
 from laufwise.trace.jsonl import JsonlTraceSink
 
@@ -47,10 +49,18 @@ def run(runbook: str, case_path: str, output_dir: str) -> None:
     fixture = json.loads(Path(case_path).read_text(encoding="utf-8"))
 
     provider = MemoryStateProvider(fixture)
+    # Bindings choose their provider; the case fixture's _params template http URLs.
+    declared = {b.provider for b in spec.state.values()}
+    state_provider = provider
+    if declared - {"memory"}:
+        providers = {"memory": provider}
+        if "http" in declared:
+            providers["http"] = HttpStateProvider(vars=provider.params)
+        state_provider = CompositeStateProvider(providers)
     trace_path = _next_episode(Path(output_dir) / spec.runbook)
     trace = JsonlTraceSink(trace_path)
     engine = LocalEngine(
-        provider=provider,
+        provider=state_provider,
         evaluator=BuiltinEvaluator(),
         trace=trace,
         approval=AutoApprovalGate(),
@@ -82,6 +92,12 @@ def run(runbook: str, case_path: str, output_dir: str) -> None:
             console.print(f"  [bold white on dark_orange] REJECT [/bold white on dark_orange]  [bold]{r.step_id}[/bold]")
             console.print(f"    postcondition failed: [yellow]{r.expr}[/yellow]")
             console.print(f"    reason: {r.reason}")
+            console.print(f"    trace: [dim]{trace_path}[/dim]")
+        elif r.status is StepStatus.STATE_UNAVAILABLE:
+            halted = True
+            console.print()
+            console.print(f"  [bold black on yellow] STATE UNAVAILABLE [/bold black on yellow]  [bold]{r.step_id}[/bold]")
+            console.print(f"    could not resolve state: {r.reason}")
             console.print(f"    trace: [dim]{trace_path}[/dim]")
     console.print()
 

@@ -1,0 +1,6 @@
+{
+  "_params": {
+    "base": "http://127.0.0.1:8973",
+    "events_path": "events_booked"
+  }
+}

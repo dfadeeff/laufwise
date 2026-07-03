@@ -31,13 +31,13 @@ it runs -- prevention, not detection:
    precondition failed: docs.contains_all(["w9", "bank_letter"])
    reason: required_docs_present=false
    blocked tool: create_vendor_draft
-   trace: runs/vendor_onboarding/trace_001.jsonl
+   trace: runs/vendor_onboarding/episode_001.jsonl
 ```
 
 Fix the data and the step passes:
 
 ```bash
-rh run examples/vendor_onboarding.yaml --case examples/cases/complete_vendor.json
+rh run examples/vendor_onboarding.yaml --case examples/cases/complete.json
 ```
 
 ```

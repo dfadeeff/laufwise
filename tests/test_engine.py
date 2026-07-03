@@ -1,12 +1,30 @@
 import json
 from pathlib import Path
 
-from laufwise.adapters.base import SimulatedAdapter, StubAdapter
-from laufwise.approval.base import AutoApprovalGate
+import pytest
+
+from laufwise.adapters.base import (
+    SimulatedAdapter,
+    StepOutcome,
+    StubAdapter,
+    ToolNotAllowed,
+    ToolRegistryAdapter,
+)
+from laufwise.approval.base import AutoApprovalGate, Decision
 from laufwise.contract.evaluator import BuiltinEvaluator
 from laufwise.engine.base import StepStatus
 from laufwise.engine.local import LocalEngine
 from laufwise.spec.loader import load_runbook
+from laufwise.spec.models import (
+    ApprovalSpec,
+    CheckSpec,
+    ExecuteSpec,
+    RunbookSpec,
+    StateBinding,
+    StepSpec,
+    VerifySpec,
+)
+from laufwise.state.base import StateView
 from laufwise.state.memory import MemoryStateProvider
 from laufwise.trace.jsonl import JsonlTraceSink
 
@@ -96,3 +114,265 @@ def test_approval_was_required_but_not_reached(tmp_path):
     eng.run(spec)
     eng.trace.close()
     assert gate.requests == []
+
+
+# --- the gates must bind (engine-asserted, not adapter-trusted) -----------------------
+
+
+class _RecordingAdapter:
+    """Records execute calls; used to prove the engine stopped BEFORE the adapter ran."""
+
+    def __init__(self):
+        self.calls = []
+
+    def execute(self, step, allowlist):
+        self.calls.append(step.id)
+        return StepOutcome(ok=True)
+
+
+class _DenyGate:
+    def request(self, step):
+        return Decision(approved=False, note="human said no")
+
+
+def _single_step_spec(step: StepSpec, state: dict[str, StateBinding] | None = None) -> RunbookSpec:
+    return RunbookSpec(runbook="t", risk="medium", state=state or {}, steps=[step])
+
+
+def test_engine_blocks_tool_outside_allowlist(tmp_path):
+    # The engine itself must refuse a declared tool missing from the step allowlist,
+    # regardless of whether the adapter would have policed it.
+    step = StepSpec(
+        id="gated",
+        tools=["allowed_tool"],
+        execute=ExecuteSpec(adapter="stub", tool="forbidden_tool"),
+    )
+    adapter = _RecordingAdapter()
+    eng = LocalEngine(
+        provider=MemoryStateProvider({}),
+        evaluator=BuiltinEvaluator(),
+        trace=JsonlTraceSink(tmp_path / "ep.jsonl"),
+        approval=AutoApprovalGate(),
+        adapter=adapter,
+    )
+    results = eng.run(_single_step_spec(step))
+    eng.trace.close()
+    assert results[0].status is StepStatus.BLOCK
+    assert results[0].reason == "tool_not_allowed"
+    assert results[0].blocked_tool == "forbidden_tool"
+    assert adapter.calls == []
+
+
+def test_approval_denial_blocks_before_execute(tmp_path):
+    step = StepSpec(
+        id="gated",
+        tools=["create_thing"],
+        approval=ApprovalSpec(prompt="ok?"),  # no required_when -> always required
+        execute=ExecuteSpec(adapter="stub", tool="create_thing"),
+    )
+    adapter = _RecordingAdapter()
+    eng = LocalEngine(
+        provider=MemoryStateProvider({}),
+        evaluator=BuiltinEvaluator(),
+        trace=JsonlTraceSink(tmp_path / "ep.jsonl"),
+        approval=_DenyGate(),
+        adapter=adapter,
+    )
+    results = eng.run(_single_step_spec(step))
+    eng.trace.close()
+    assert results[0].status is StepStatus.BLOCK
+    assert results[0].reason == "approval_denied"
+    assert results[0].blocked_tool == "create_thing"
+    assert adapter.calls == []
+
+
+def test_state_unavailable_is_first_class_halt(tmp_path):
+    # A declared binding missing from the fixture must halt as STATE_UNAVAILABLE —
+    # never crash, and never masquerade as empty state that a check could pass on.
+    spec = load_runbook(RUNBOOK)
+    fixture = _fixture("complete.json")
+    del fixture["duplicates"]
+    eng = _engine(tmp_path / "ep.jsonl", MemoryStateProvider(fixture))
+    results = eng.run(spec)
+    eng.trace.close()
+    assert results[0].status is StepStatus.STATE_UNAVAILABLE
+    assert "duplicates" in results[0].reason
+    assert len(results) == 1  # run halted
+
+
+# --- non-circular execution: the tool impl decides state, never the declared effect ---
+
+
+def _registry_spec() -> RunbookSpec:
+    step = StepSpec(
+        id="create",
+        tools=["create_rec"],
+        execute=ExecuteSpec(adapter="registry", tool="create_rec"),
+        postconditions=[CheckSpec(expr="rec.exists == true")],
+    )
+    return _single_step_spec(step, state={"rec": StateBinding(provider="memory")})
+
+
+def test_registry_adapter_honest_tool_passes(tmp_path):
+    provider = MemoryStateProvider({"rec": None})
+    tools = {"create_rec": lambda p, step: p.apply({"rec": {"status": "created"}})}
+    eng = _engine(tmp_path / "ep.jsonl", provider, adapter=ToolRegistryAdapter(provider, tools))
+    results = eng.run(_registry_spec())
+    eng.trace.close()
+    assert results[0].status is StepStatus.OK
+
+
+def test_registry_adapter_lying_tool_rejected(tmp_path):
+    # The tool claims success but writes nothing; the postcondition re-queries state and REJECTs.
+    provider = MemoryStateProvider({"rec": None})
+    tools = {"create_rec": lambda p, step: StepOutcome(ok=True, note="claimed, wrote nothing")}
+    eng = _engine(tmp_path / "ep.jsonl", provider, adapter=ToolRegistryAdapter(provider, tools))
+    results = eng.run(_registry_spec())
+    eng.trace.close()
+    assert results[0].status is StepStatus.REJECT
+    assert results[0].expr == "rec.exists == true"
+
+
+class _RaisingAdapter:
+    """Simulates an adapter refusing a disallowed call mid-execution (defense in depth)."""
+
+    def execute(self, step, allowlist):
+        raise ToolNotAllowed("agent attempted 'delete_everything' mid-execution")
+
+
+def test_adapter_raised_toolnotallowed_blocks_not_crashes(tmp_path):
+    # The declared tool passes the engine's own assert; the adapter's refusal of what actually
+    # happened during execution must surface as a BLOCK, never as an unhandled exception.
+    step = StepSpec(
+        id="gated",
+        tools=["create_thing"],
+        execute=ExecuteSpec(adapter="stub", tool="create_thing"),
+    )
+    eng = LocalEngine(
+        provider=MemoryStateProvider({}),
+        evaluator=BuiltinEvaluator(),
+        trace=JsonlTraceSink(tmp_path / "ep.jsonl"),
+        approval=AutoApprovalGate(),
+        adapter=_RaisingAdapter(),
+    )
+    results = eng.run(_single_step_spec(step))
+    eng.trace.close()
+    assert results[0].status is StepStatus.BLOCK
+    assert results[0].reason.startswith("tool_not_allowed")
+
+
+# --- verify: bounded re-verification absorbs read-after-write lag ---------------------
+
+
+class _LaggingProvider(MemoryStateProvider):
+    """Read-replica lag: reads of `rec` return stale None for the first N queries."""
+
+    def __init__(self, fixture, stale_reads: int):
+        super().__init__(fixture)
+        self.stale_reads = stale_reads
+
+    def query(self, name, params=None):
+        if name == "rec" and self.stale_reads > 0:
+            self.stale_reads -= 1
+            return StateView(None)
+        return super().query(name, params)
+
+
+def _verify_spec(retries: int) -> RunbookSpec:
+    step = StepSpec(
+        id="create",
+        tools=["create_rec"],
+        execute=ExecuteSpec(adapter="registry", tool="create_rec"),
+        postconditions=[CheckSpec(expr="rec.exists == true")],
+        verify=VerifySpec(retries=retries, backoff_s=0.0),
+    )
+    return _single_step_spec(step, state={"rec": StateBinding(provider="memory")})
+
+
+def test_verify_retry_absorbs_read_lag(tmp_path):
+    # The write lands but the first post-execute read is stale; one re-verification sees it.
+    provider = _LaggingProvider({"rec": None}, stale_reads=2)  # pre-read + first post-read
+    tools = {"create_rec": lambda p, step: p.apply({"rec": {"status": "created"}})}
+    eng = _engine(tmp_path / "ep.jsonl", provider, adapter=ToolRegistryAdapter(provider, tools))
+    results = eng.run(_verify_spec(retries=1))
+    eng.trace.close()
+    assert results[0].status is StepStatus.OK
+
+
+def test_without_verify_retry_read_lag_rejects(tmp_path):
+    # Same lag, no re-verification budget: the honest-but-laggy write is (correctly, per
+    # contract) rejected — which is exactly why `verify.retries` exists.
+    provider = _LaggingProvider({"rec": None}, stale_reads=2)
+    tools = {"create_rec": lambda p, step: p.apply({"rec": {"status": "created"}})}
+    eng = _engine(tmp_path / "ep.jsonl", provider, adapter=ToolRegistryAdapter(provider, tools))
+    results = eng.run(_verify_spec(retries=0))
+    eng.trace.close()
+    assert results[0].status is StepStatus.REJECT
+
+
+# --- bindings are plumbed to the provider; on_fail modes fail loud --------------------
+
+
+class _ParamRecordingProvider:
+    """Asserts the engine transports the full binding to the provider untouched."""
+
+    def __init__(self):
+        self.seen: list[tuple[str, dict | None]] = []
+
+    def query(self, name, params=None):
+        self.seen.append((name, params))
+        return StateView({"status": "ok"})
+
+
+def test_binding_query_and_params_reach_provider(tmp_path):
+    provider = _ParamRecordingProvider()
+    step = StepSpec(id="s", postconditions=[CheckSpec(expr="candidate.exists == true")])
+    spec = _single_step_spec(
+        step,
+        state={
+            "candidate": StateBinding(
+                provider="http",
+                query="/candidates/{cid}",
+                extract="data.0",
+                params={"cid": "c-1"},
+            )
+        },
+    )
+    eng = _engine(tmp_path / "ep.jsonl", provider)
+    results = eng.run(spec)
+    eng.trace.close()
+    assert results[0].status is StepStatus.OK
+    name, params = provider.seen[0]
+    assert name == "candidate"
+    assert params == {
+        "provider": "http",
+        "query": "/candidates/{cid}",
+        "extract": "data.0",
+        "vars": {"cid": "c-1"},
+    }
+
+
+def test_on_fail_unknown_mode_is_rejected():
+    with pytest.raises(Exception):
+        StepSpec(id="s", on_fail="continue")
+
+
+def test_on_fail_unimplemented_mode_warns_and_halts(tmp_path):
+    # `retry(2)` parses (it is a defined mode) but v0 warns and treats it as halt: a REJECT
+    # must stop the run, never silently continue to the next step.
+    with pytest.warns(UserWarning, match="treated as halt"):
+        failing = StepSpec(
+            id="first",
+            postconditions=[CheckSpec(expr="rec.exists == true")],
+            on_fail="retry(2)",
+        )
+    never_reached = StepSpec(id="second")
+    spec = RunbookSpec(
+        runbook="t", state={"rec": StateBinding(provider="memory")},
+        steps=[failing, never_reached],
+    )
+    eng = _engine(tmp_path / "ep.jsonl", MemoryStateProvider({"rec": None}))
+    results = eng.run(spec)
+    eng.trace.close()
+    assert results[0].status is StepStatus.REJECT
+    assert len(results) == 1  # halted: `second` never ran

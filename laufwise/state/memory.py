@@ -8,7 +8,7 @@ connection.
 
 from __future__ import annotations
 
-from laufwise.state.base import StateView
+from laufwise.state.base import StateUnavailable, StateView
 
 
 class MemoryStateProvider:
@@ -20,6 +20,11 @@ class MemoryStateProvider:
         return self.fixture.get("_params", {})
 
     def query(self, name: str, params: dict | None = None) -> StateView:
+        # A key that is absent is UNAVAILABLE (the case never supplied it); a key that is
+        # present-but-null is real state meaning "does not exist". The distinction is the
+        # difference between "cannot check" and "checked, found nothing".
+        if name not in self.fixture:
+            raise StateUnavailable(f"binding {name!r} not present in the case fixture")
         return StateView(self.fixture.get(name))
 
     def apply(self, effect: dict) -> None:

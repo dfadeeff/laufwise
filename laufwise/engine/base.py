@@ -9,8 +9,16 @@ from enum import Enum
 
 class StepStatus(str, Enum):
     OK = "ok"          # all conditions satisfied against real state
-    BLOCK = "block"    # precondition failed -> stopped BEFORE any tool ran
+    # a gate refused the step: failed precondition, tool outside the allowlist, or approval
+    # denied — in every case the declared tool was not executed by the engine. Adapters that
+    # refuse mid-execution (ToolNotAllowed) MUST do so before causing side effects, or the
+    # BLOCK they trigger would hide an unverified partial write.
+    BLOCK = "block"
     REJECT = "reject"  # postcondition failed -> outcome not accepted despite agent claim
+    # a declared state binding could not be resolved -> checks cannot run, so the step
+    # halts as its own outcome (CLAUDE.md invariant #4: first-class, never a crash, and
+    # never silently evaluated as empty state)
+    STATE_UNAVAILABLE = "state_unavailable"
 
 
 @dataclass
