@@ -30,6 +30,14 @@ class ExecutionAdapter(Protocol):
     def execute(self, step: StepSpec, allowlist: list[str]) -> StepOutcome: ...
 
 
+def _declared_tool(step: StepSpec, allowlist: list[str]) -> str | None:
+    """The step's declared tool, refused (ToolNotAllowed) if outside the allowlist."""
+    tool = step.execute.tool if step.execute else None
+    if tool is not None and tool not in allowlist:
+        raise ToolNotAllowed(f"{tool!r} not in step allowlist {allowlist}")
+    return tool
+
+
 class StubAdapter:
     """v0 stub — does nothing, but still enforces the allowlist contract.
 
@@ -38,9 +46,7 @@ class StubAdapter:
     """
 
     def execute(self, step: StepSpec, allowlist: list[str]) -> StepOutcome:
-        tool = step.execute.tool if step.execute else None
-        if tool is not None and tool not in allowlist:
-            raise ToolNotAllowed(f"{tool!r} not in step allowlist {allowlist}")
+        _declared_tool(step, allowlist)
         return StepOutcome(ok=True, note="execute skipped (v0 stub)")
 
 
@@ -54,9 +60,7 @@ class SimulatedAdapter:
         self.provider = provider
 
     def execute(self, step: StepSpec, allowlist: list[str]) -> StepOutcome:
-        tool = step.execute.tool if step.execute else None
-        if tool is not None and tool not in allowlist:
-            raise ToolNotAllowed(f"{tool!r} not in step allowlist {allowlist}")
+        _declared_tool(step, allowlist)
         effect = step.execute.effect if step.execute else {}
         if effect and hasattr(self.provider, "apply"):
             self.provider.apply(effect)
@@ -77,11 +81,9 @@ class ToolRegistryAdapter:
         self.tools = tools
 
     def execute(self, step: StepSpec, allowlist: list[str]) -> StepOutcome:
-        tool = step.execute.tool if step.execute else None
+        tool = _declared_tool(step, allowlist)
         if tool is None:
             return StepOutcome(ok=True, note="no tool declared")
-        if tool not in allowlist:
-            raise ToolNotAllowed(f"{tool!r} not in step allowlist {allowlist}")
         impl = self.tools.get(tool)
         if impl is None:
             return StepOutcome(ok=False, note=f"no implementation registered for {tool!r}")

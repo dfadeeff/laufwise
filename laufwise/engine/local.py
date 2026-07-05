@@ -58,6 +58,13 @@ class LocalEngine:
         }
 
     @staticmethod
+    def _blocked_tool(step: StepSpec) -> str | None:
+        """The tool a halt prevented: the declared execute tool, else the first allowlisted."""
+        if step.execute is not None and step.execute.tool is not None:
+            return step.execute.tool
+        return step.tools[0] if step.tools else None
+
+    @staticmethod
     def _state_hash(state: dict[str, StateView]) -> str:
         repr_ = {name: view.value for name, view in state.items()}
         blob = json.dumps(repr_, sort_keys=True, default=str)
@@ -79,23 +86,31 @@ class LocalEngine:
         return True
 
     # --- the contract -----------------------------------------------------
-    def run_step(self, spec: RunbookSpec, step: StepSpec) -> StepResult:
+    # run_step composes gate_step -> execute -> verify_step. Session drivers (the MCP
+    # server, ARCHITECTURE §1.6) call gate_step at begin_step and verify_step at
+    # complete_step, with the agent acting through the scoped proxy in between —
+    # same contract functions, two drive modes.
+
+    def gate_step(self, spec: RunbookSpec, step: StepSpec) -> tuple[StepResult | None, str | None]:
+        """Phases 1-3: preconditions, declared-tool allowlist assert, approval.
+
+        Returns (failure, pre_hash); failure is None when the gate passes.
+        """
         try:
             pre_state = self._resolve_state(spec)
         except StateUnavailable as exc:
-            return StepResult(step.id, StepStatus.STATE_UNAVAILABLE, reason=str(exc))
+            return StepResult(step.id, StepStatus.STATE_UNAVAILABLE, reason=str(exc)), None
         pre_hash = self._state_hash(pre_state)
 
         # 1. preconditions (vs real state) -> BLOCK before any tool runs
         for check in step.preconditions:
             res = self.evaluator.evaluate(check.expr, pre_state)
             if not res.ok:
-                blocked = step.execute.tool if step.execute else (step.tools[0] if step.tools else None)
                 return StepResult(
                     step.id, StepStatus.BLOCK,
                     reason=check.reason or res.detail,
-                    expr=check.expr, blocked_tool=blocked, state_hash=pre_hash,
-                )
+                    expr=check.expr, blocked_tool=self._blocked_tool(step), state_hash=pre_hash,
+                ), pre_hash
 
         # 2. tool allowlist — asserted by the engine itself; adapters also refuse
         #    (defense in depth), but the guarantee must not depend on adapter cooperation.
@@ -104,22 +119,28 @@ class LocalEngine:
                 step.id, StepStatus.BLOCK,
                 reason="tool_not_allowed",
                 blocked_tool=step.execute.tool, state_hash=pre_hash,
-            )
+            ), pre_hash
 
         # 3. approval gate — a denial BLOCKs before the tool runs.
         if self._approval_required(spec, step):
             decision = self.approval.request(step)
             if not decision.approved:
-                blocked = step.execute.tool if step.execute else (step.tools[0] if step.tools else None)
                 return StepResult(
                     step.id, StepStatus.BLOCK,
                     reason="approval_denied",
-                    blocked_tool=blocked, state_hash=pre_hash,
-                )
+                    blocked_tool=self._blocked_tool(step), state_hash=pre_hash,
+                ), pre_hash
+
+        return None, pre_hash
+
+    def run_step(self, spec: RunbookSpec, step: StepSpec) -> StepResult:
+        failure, pre_hash = self.gate_step(spec, step)
+        if failure is not None:
+            return failure
 
         # 4. execute via adapter (the only place the model acts; allowlist-bounded).
         #    A ToolNotAllowed raised DURING execution (an adapter refusing a runtime tool
-        #    attempt, e.g. a future MCP session) is a traced halt, never a crash.
+        #    attempt) is a traced halt, never a crash.
         if step.execute is not None:
             try:
                 self.adapter.execute(step, allowlist=step.tools)
@@ -130,38 +151,37 @@ class LocalEngine:
                     blocked_tool=step.execute.tool, state_hash=pre_hash,
                 )
 
+        return self.verify_step(spec, step)
+
+    def verify_step(self, spec: RunbookSpec, step: StepSpec) -> StepResult:
         # 5. postconditions vs state RE-RESOLVED after execution -> REJECT even if the agent
         #    claimed success. Re-resolving is what makes this a check on reality, not a claim.
         #    State lost after the action is still STATE_UNAVAILABLE: the outcome is unverified,
         #    so it is not accepted. step.verify bounds re-checks for eventually-consistent
         #    sources — re-verification only, never re-execution.
-        attempts = step.verify.retries + 1
-        for attempt in range(1, attempts + 1):
-            if attempt > 1:
+        failure = None
+        for attempt in range(step.verify.retries + 1):
+            if attempt:
                 time.sleep(step.verify.backoff_s)
             try:
                 post_state = self._resolve_state(spec)
             except StateUnavailable as exc:
-                if attempt == attempts:
-                    return StepResult(step.id, StepStatus.STATE_UNAVAILABLE, reason=str(exc))
+                failure = StepResult(step.id, StepStatus.STATE_UNAVAILABLE, reason=str(exc))
                 continue
             post_hash = self._state_hash(post_state)
-            failed: tuple | None = None
+            failure = None
             for check in step.postconditions:
                 res = self.evaluator.evaluate(check.expr, post_state)
                 if not res.ok:
-                    failed = (check, res)
+                    failure = StepResult(
+                        step.id, StepStatus.REJECT,
+                        reason=check.reason or res.detail,
+                        expr=check.expr, state_hash=post_hash,
+                    )
                     break
-            if failed is None:
+            if failure is None:
                 return StepResult(step.id, StepStatus.OK, state_hash=post_hash)
-            if attempt == attempts:
-                check, res = failed
-                return StepResult(
-                    step.id, StepStatus.REJECT,
-                    reason=check.reason or res.detail,
-                    expr=check.expr, state_hash=post_hash,
-                )
-        raise AssertionError("unreachable: verify loop must return")
+        return failure  # the last attempt's REJECT or STATE_UNAVAILABLE stands
 
     def run(self, spec: RunbookSpec) -> list[StepResult]:
         results: list[StepResult] = []
