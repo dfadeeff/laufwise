@@ -5,4 +5,4 @@ precondition -> tool allowlist -> approval -> execute -> postcondition -> checkp
 The order is the product guarantee. See ARCHITECTURE.md and CLAUDE.md.
 """
 
-__version__ = "0.0.1"
+__version__ = "0.1.0"

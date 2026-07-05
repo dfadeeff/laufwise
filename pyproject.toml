@@ -4,11 +4,24 @@ build-backend = "hatchling.build"
 
 [project]
 name = "laufwise"
-version = "0.0.1"
+version = "0.1.0"
 description = "Runbook-as-code harness: force agents to execute inside a process contract."
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.11"
+authors = [{ name = "Dmitry Fadeev", email = "fadejeff@gmail.com" }]
+keywords = ["agents", "runbook", "process-contract", "verification", "mcp", "governance"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Typing :: Typed",
+]
 dependencies = [
   "pydantic>=2.0",
   "pyyaml>=6.0",
@@ -24,6 +37,11 @@ otel = [
   "opentelemetry-exporter-otlp-proto-http>=1.20",
 ]
 mcp = ["mcp>=1.2"]
+
+[project.urls]
+Homepage = "https://github.com/dfadeeff/laufwise"
+Repository = "https://github.com/dfadeeff/laufwise"
+Issues = "https://github.com/dfadeeff/laufwise/issues"
 
 [project.scripts]
 rh = "laufwise.cli:cli"
