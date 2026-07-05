@@ -189,6 +189,15 @@ steps:
     on_fail: halt
 ```
 
+**Failure semantics.** `on_fail` applies to a REJECT (postcondition failure) only — a failed
+precondition always BLOCKs and halts. Modes: `halt` (default), `goto(step_id)`, `retry(n[,
+backoff])`, `compensate(step_id)`. Implemented: `halt` and `goto` — a REJECT routes to the
+target step (e.g. a human-review step) and the sequence resumes from there. Routing is
+deterministically bounded: no step may start more than `max_step_visits` times per run
+(runbook-level, default 3); exhaustion is a traced halt and the REJECT stands. goto targets
+are validated at load (must exist, must differ from the step — re-running the same step is
+`retry`, which, like `compensate`, parses but is treated as halt for now, with a warning).
+
 **Check language.** Checks are pure expressions over the named state bindings (a tiny,
 sandboxed predicate DSL: `binding.field op value`, `.exists`, `.count`, `.contains_all([..])`).
 Escape hatch: `check: py:my_module.my_predicate` for a registered Python callable that receives

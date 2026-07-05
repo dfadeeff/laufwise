@@ -55,7 +55,10 @@ Core sentence: *Others run agents. This defines the process contract they must o
   never the default path.
 - **Explicit failure semantics in the spec.** `on_fail` is not free text. Defined modes:
   `halt` (default), `retry(n, backoff)`, `goto(step_id)`, `compensate(step_id)`. Precondition
-  fail → BLOCK. Postcondition fail → REJECT, then apply `on_fail`. Document the chosen mode.
+  fail → BLOCK. Postcondition fail → REJECT, then apply `on_fail`. Implemented: `halt`,
+  `goto` (routes the REJECT to a declared step, bounded by runbook-level `max_step_visits`
+  so every routing loop terminates in the engine); `retry`/`compensate` parse but warn and
+  halt. Document the chosen mode.
 - **MCP is the primary distribution channel, both directions.** Inbound: expose runbook steps
   as MCP tools so any MCP client (Claude, Cursor, any agent) can be the execution backend.
   Outbound: let state queries and `execute` steps call MCP servers, so existing MCP
@@ -71,10 +74,13 @@ Core sentence: *Others run agents. This defines the process contract they must o
 
 - **A. Check DSL scope at v0:** tiny built-in DSL + `py:` escape hatch now, CEL as the drop-in
   upgrade — *current lean: tiny-DSL-behind-protocol, CEL-ready*.
-- **B. Runbook control flow:** pure sequence at v0 ("the order is the guarantee"), with a
-  documented path to `if/match/retry`/branching — *current lean: pure sequence v0*. The
-  insolvency case may force branching (e.g. "if § 133 flag found, run deeper Kenntnis
-  analysis"); add it deliberately, not by accident.
+- **B. Runbook control flow: DECIDED (2026-07-06) — sequence + `on_fail: goto` routing.**
+  The candidate-intake runbook forced the first branch ("dedup fails → route to merge
+  review"), so goto was added deliberately: REJECT-only (a BLOCK still always halts), targets
+  validated at load, loops bounded by runbook-level `max_step_visits` — control flow stays
+  deterministic and in the engine (invariant #1). General `if/match` branching remains OUT;
+  the insolvency case (e.g. "if § 133 flag found, run deeper Kenntnis analysis") may force
+  it — add it deliberately, not by accident. `retry`/`compensate` are still parse-only.
 - **C. Inbound MCP shape: DECIDED (2026-07-04) — explicit step session + step-scoped proxy.**
   `rh serve <runbook> --wrap <mcp-server>...` exposes `begin_step`/`complete_step` control
   tools plus ONLY the current step's allowlisted downstream tools (re-scoped via

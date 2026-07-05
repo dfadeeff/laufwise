@@ -183,9 +183,35 @@ class LocalEngine:
                 return StepResult(step.id, StepStatus.OK, state_hash=post_hash)
         return failure  # the last attempt's REJECT or STATE_UNAVAILABLE stands
 
+    @staticmethod
+    def route_reject(
+        spec: RunbookSpec, step: StepSpec, visits: dict[str, int]
+    ) -> tuple[str | None, str | None]:
+        """Rule on a REJECT's on_fail: (goto_target, None) routes, (None, halt_reason) halts.
+
+        on_fail applies to REJECT only — a BLOCK always halts. halt is the default mode
+        (and the fallback for retry/compensate, which warn at spec load). goto routes to a
+        declared step, bounded by spec.max_step_visits so every routing loop terminates;
+        exhaustion is a traced halt and the REJECT stands as the step's final ruling.
+        """
+        target = step.on_fail_goto
+        if target is None:
+            return None, None
+        if visits.get(target, 0) >= spec.max_step_visits:
+            return None, (
+                f"on_fail goto({target!r}) exhausted: step already started "
+                f"{visits[target]} times (max_step_visits={spec.max_step_visits})"
+            )
+        return target, None
+
     def run(self, spec: RunbookSpec) -> list[StepResult]:
         results: list[StepResult] = []
-        for step in spec.steps:
+        index = {step.id: i for i, step in enumerate(spec.steps)}
+        visits: dict[str, int] = {}
+        i = 0
+        while i < len(spec.steps):
+            step = spec.steps[i]
+            visits[step.id] = visits.get(step.id, 0) + 1
             result = self.run_step(spec, step)
             results.append(result)
             # 6. checkpoint + trace
@@ -193,7 +219,13 @@ class LocalEngine:
             if result.status in (StepStatus.BLOCK, StepStatus.STATE_UNAVAILABLE):
                 break
             if result.status is StepStatus.REJECT:
-                # v0 implements on_fail=halt only; other modes warn at spec load and are
-                # treated as halt here. Continuing past a REJECT is never the default.
-                break
+                target, halt_reason = self.route_reject(spec, step, visits)
+                if target is None:
+                    if halt_reason:
+                        self.trace.event(step_id=step.id, status="halt", reason=halt_reason)
+                    break
+                # sequence resumes from the target: goto is a jump, not a detour
+                i = index[target]
+                continue
+            i += 1
         return results

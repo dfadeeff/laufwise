@@ -73,7 +73,7 @@ def _payload(result) -> dict:
     return json.loads(result.content[0].text)
 
 
-async def _drive(record: dict, honest: bool, scenario):
+async def _drive(record: dict, honest: bool, scenario, spec: RunbookSpec | None = None):
     """Wire downstream calendar + laufwise session over in-memory MCP, run `scenario`."""
     provider = MemoryStateProvider(record)
     engine = LocalEngine(
@@ -87,7 +87,7 @@ async def _drive(record: dict, honest: bool, scenario):
     async with create_connected_server_and_client_session(calendar._mcp_server) as downstream:
         listed = await downstream.list_tools()
         tools = {t.name: (downstream, t) for t in listed.tools}
-        runbook = RunbookMcpServer(_spec(), engine, tools)
+        runbook = RunbookMcpServer(spec or _spec(), engine, tools)
         async with create_connected_server_and_client_session(runbook.server) as client:
             await scenario(client, runbook)
     engine.trace.close()
@@ -146,6 +146,40 @@ def test_lying_tool_is_rejected_and_session_halts(tmp_path):
         assert "halted" in refused["refused"]
 
     asyncio.run(_drive(record, honest=False, scenario=scenario))
+
+
+def test_reject_with_goto_routes_session_instead_of_halting(tmp_path):
+    # The write step's postcondition fails (lying downstream tool), but on_fail=goto routes
+    # the session to the escalation step instead of ending it — same rule as engine.run.
+    spec = RunbookSpec(
+        runbook="booking",
+        state={"event": StateBinding(provider="memory"), "slot": StateBinding(provider="memory")},
+        steps=[
+            StepSpec(
+                id="book_slot",
+                preconditions=[CheckSpec(expr="slot.exists == true")],
+                tools=["create_event"],
+                postconditions=[CheckSpec(expr="event.exists == true")],
+                on_fail="goto(escalate)",
+            ),
+            StepSpec(id="escalate", description="hand the case to a human", tools=[]),
+        ],
+    )
+    record = {"slot": {"free": True}, "event": None, "_trace_path": tmp_path / "ep.jsonl"}
+
+    async def scenario(client, runbook):
+        await client.call_tool(BEGIN_STEP, {})
+        await client.call_tool("create_event", {"title": "x"})  # claims success, writes nothing
+        done = _payload(await client.call_tool(COMPLETE_STEP, {}))
+        assert done["status"] == "reject"
+        assert done["next_step"] == "escalate"
+        # not halted: the routed step begins and the runbook can finish
+        begun = _payload(await client.call_tool(BEGIN_STEP, {}))
+        assert begun["status"] == "step_active" and begun["step"] == "escalate"
+        final = _payload(await client.call_tool(COMPLETE_STEP, {}))
+        assert final["status"] == "ok" and final.get("runbook") == "complete"
+
+    asyncio.run(_drive(record, honest=False, scenario=scenario, spec=spec))
 
 
 def test_failing_precondition_blocks_begin_step(tmp_path):

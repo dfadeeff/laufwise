@@ -167,9 +167,10 @@ process, unchanged. That's the test of a primitive.
 ## Status
 
 v0. Implemented: spec loader, check DSL, memory/http/composite state providers, local engine
-with verify retries, simulated + tool-registry execution adapters, JSONL trace, OTEL trace
-sink, inbound MCP step session (`rh serve --wrap`), CLI. Stubbed: approval UI (auto-approve),
-LLM execution adapter, `rh test` / `rh replay`, SQLite durable store, Temporal engine.
+with verify retries and `on_fail: goto` routing (bounded, REJECT-only), simulated +
+tool-registry execution adapters, JSONL trace, OTEL trace sink, inbound MCP step session
+(`rh serve --wrap`), CLI. Stubbed: approval UI (auto-approve), LLM execution adapter,
+`on_fail: retry/compensate`, `rh test` / `rh replay`, SQLite durable store, Temporal engine.
 Roadmap in [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ```bash

@@ -11,10 +11,12 @@ from __future__ import annotations
 import re
 import warnings
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 # Defined failure modes (CLAUDE.md): halt | retry(n[, backoff]) | goto(step) | compensate(step).
 _ON_FAIL = re.compile(r"^(halt|retry\([^)]*\)|goto\(\w+\)|compensate\(\w+\))$")
+_GOTO = re.compile(r"^goto\((\w+)\)$")
+_IMPLEMENTED_ON_FAIL = ("halt", "goto(")
 
 
 class CheckSpec(BaseModel):
@@ -82,7 +84,9 @@ class StepSpec(BaseModel):
     postconditions: list[CheckSpec] = Field(default_factory=list)
     verify: VerifySpec = Field(default_factory=VerifySpec)
     # Defined failure modes (CLAUDE.md): halt (default) | retry | goto | compensate.
-    # v0 implements `halt` only; others parse but are treated as halt with a warning.
+    # Implemented: halt, goto(step) — a REJECT routes to the target step (e.g. a human-review
+    # step), bounded by RunbookSpec.max_step_visits. retry/compensate parse but are treated
+    # as halt with a warning. on_fail never applies to BLOCK: a failed precondition halts.
     on_fail: str = "halt"
 
     @field_validator("on_fail")
@@ -93,17 +97,51 @@ class StepSpec(BaseModel):
             raise ValueError(
                 f"on_fail must be halt | retry(...) | goto(step) | compensate(step), got {v!r}"
             )
-        if v != "halt":
+        if not v.startswith(_IMPLEMENTED_ON_FAIL):
             warnings.warn(
-                f"on_fail={v!r} is parsed but not implemented in v0 — treated as halt",
+                f"on_fail={v!r} is parsed but not implemented yet — treated as halt",
                 stacklevel=2,
             )
         return v
+
+    @property
+    def on_fail_goto(self) -> str | None:
+        """The goto target step id when on_fail is goto(step_id); None for every other mode."""
+        m = _GOTO.match(self.on_fail)
+        return m.group(1) if m else None
 
 
 class RunbookSpec(BaseModel):
     runbook: str
     version: int = 1
     risk: str = "low"
+    # Termination bound for on_fail goto routing: no step may START more than this many
+    # times in one run. A route that would exceed it halts the run (traced), so every
+    # routing loop terminates — deterministically, in the engine, per invariant #1.
+    max_step_visits: int = Field(default=3, ge=1)
     state: dict[str, StateBinding] = Field(default_factory=dict)
     steps: list[StepSpec]
+
+    @model_validator(mode="after")
+    def _steps_form_a_valid_graph(self) -> RunbookSpec:
+        # goto made step ids into routing targets, so they must be unique and every
+        # target must exist — a dangling route is a config error, caught at load.
+        ids = [step.id for step in self.steps]
+        duplicates = sorted({i for i in ids if ids.count(i) > 1})
+        if duplicates:
+            raise ValueError(f"duplicate step ids: {duplicates}")
+        known = set(ids)
+        for step in self.steps:
+            target = step.on_fail_goto
+            if target is None:
+                continue
+            if target == step.id:
+                raise ValueError(
+                    f"step {step.id!r}: goto must target a different step — "
+                    "re-running the same step is retry(...)"
+                )
+            if target not in known:
+                raise ValueError(
+                    f"step {step.id!r}: on_fail goto targets unknown step {target!r}"
+                )
+        return self

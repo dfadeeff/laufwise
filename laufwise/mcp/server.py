@@ -52,6 +52,8 @@ class RunbookMcpServer:
         self.engine = engine
         self.downstream = downstream or {}
         self.index = 0
+        self._index_of = {step.id: i for i, step in enumerate(spec.steps)}
+        self.visits: dict[str, int] = {}
         self.step_active = False
         self.halted: StepResult | None = None
         self.results: list[StepResult] = []
@@ -152,6 +154,7 @@ class RunbookMcpServer:
             })
 
         self.step_active = True
+        self.visits[step.id] = self.visits.get(step.id, 0) + 1
         await self._notify_tools_changed()
         return _text({
             "status": "step_active",
@@ -170,10 +173,21 @@ class RunbookMcpServer:
         result = await anyio.to_thread.run_sync(self.engine.verify_step, self.spec, step)
         self._record(result)
         self.step_active = False
+        routed_to: str | None = None
         if result.status is StepStatus.OK:
             self.index += 1
+        elif result.status is StepStatus.REJECT:
+            # Same routing rule as engine.run: on_fail goto re-positions the session
+            # (bounded by max_step_visits); halt/exhaustion ends it.
+            routed_to, halt_reason = self.engine.route_reject(self.spec, step, self.visits)
+            if routed_to is not None:
+                self.index = self._index_of[routed_to]
+            else:
+                if halt_reason:
+                    self.engine.trace.event(step_id=step.id, status="halt", reason=halt_reason)
+                self.halted = result
         else:
-            # v0 on_fail is halt; REJECT/STATE_UNAVAILABLE ends the session.
+            # STATE_UNAVAILABLE ends the session: the outcome is unverified.
             self.halted = result
         await self._notify_tools_changed()
 
@@ -185,6 +199,9 @@ class RunbookMcpServer:
                 payload["runbook"] = "complete"
         else:
             payload.update({"reason": result.reason, "check": result.expr})
+            if routed_to is not None:
+                payload["next_step"] = routed_to
+                payload["note"] = f"on_fail routed to {routed_to!r} — call {BEGIN_STEP}"
         return _text(payload)
 
     # --- the scoped proxy -----------------------------------------------------

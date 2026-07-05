@@ -357,6 +357,91 @@ def test_on_fail_unknown_mode_is_rejected():
         StepSpec(id="s", on_fail="continue")
 
 
+# --- on_fail goto: REJECT routes to a declared step, deterministically bounded --------
+
+
+def test_on_fail_goto_routes_reject(tmp_path):
+    # Dedup-style routing: the write step's postcondition fails -> the run routes to the
+    # review step instead of halting, and the sequence resumes from the target.
+    failing = StepSpec(
+        id="write",
+        postconditions=[CheckSpec(expr="rec.exists == true")],
+        on_fail="goto(manual_review)",
+    )
+    review = StepSpec(id="manual_review")
+    spec = RunbookSpec(
+        runbook="t", state={"rec": StateBinding(provider="memory")},
+        steps=[failing, review],
+    )
+    eng = _engine(tmp_path / "ep.jsonl", MemoryStateProvider({"rec": None}))
+    results = eng.run(spec)
+    eng.trace.close()
+    assert [(r.step_id, r.status) for r in results] == [
+        ("write", StepStatus.REJECT),
+        ("manual_review", StepStatus.OK),
+    ]
+
+
+def test_on_fail_goto_loop_is_bounded(tmp_path):
+    # A backward goto forms a loop; max_step_visits bounds it. Exhaustion is a traced halt
+    # and the REJECT stands as the step's final ruling.
+    prep = StepSpec(id="prep")
+    write = StepSpec(
+        id="write",
+        postconditions=[CheckSpec(expr="rec.exists == true")],
+        on_fail="goto(prep)",
+    )
+    spec = RunbookSpec(
+        runbook="t", max_step_visits=2,
+        state={"rec": StateBinding(provider="memory")},
+        steps=[prep, write],
+    )
+    trace_path = tmp_path / "ep.jsonl"
+    eng = _engine(trace_path, MemoryStateProvider({"rec": None}))
+    results = eng.run(spec)
+    eng.trace.close()
+    assert [r.step_id for r in results] == ["prep", "write", "prep", "write"]
+    assert results[-1].status is StepStatus.REJECT
+    events = [json.loads(line) for line in trace_path.read_text().splitlines()]
+    assert events[-1]["status"] == "halt"
+    assert "exhausted" in events[-1]["reason"]
+
+
+def test_goto_never_applies_to_block(tmp_path):
+    # on_fail is postcondition semantics only: a failed precondition BLOCKs and halts,
+    # even when the step declares goto (CLAUDE.md: precondition fail -> BLOCK).
+    gated = StepSpec(
+        id="gated",
+        preconditions=[CheckSpec(expr="rec.exists == true")],
+        on_fail="goto(review)",
+    )
+    review = StepSpec(id="review")
+    spec = RunbookSpec(
+        runbook="t", state={"rec": StateBinding(provider="memory")},
+        steps=[gated, review],
+    )
+    eng = _engine(tmp_path / "ep.jsonl", MemoryStateProvider({"rec": None}))
+    results = eng.run(spec)
+    eng.trace.close()
+    assert results[0].status is StepStatus.BLOCK
+    assert len(results) == 1
+
+
+def test_goto_unknown_target_fails_at_load():
+    with pytest.raises(Exception, match="unknown step"):
+        RunbookSpec(runbook="t", steps=[StepSpec(id="a", on_fail="goto(missing)")])
+
+
+def test_goto_self_target_fails_at_load():
+    with pytest.raises(Exception, match="different step"):
+        RunbookSpec(runbook="t", steps=[StepSpec(id="a", on_fail="goto(a)")])
+
+
+def test_duplicate_step_ids_fail_at_load():
+    with pytest.raises(Exception, match="duplicate step ids"):
+        RunbookSpec(runbook="t", steps=[StepSpec(id="a"), StepSpec(id="a")])
+
+
 def test_on_fail_unimplemented_mode_warns_and_halts(tmp_path):
     # `retry(2)` parses (it is a defined mode) but v0 warns and treats it as halt: a REJECT
     # must stop the run, never silently continue to the next step.
