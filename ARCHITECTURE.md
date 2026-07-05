@@ -100,7 +100,36 @@ and a valid InsO paragraph. Whether the citation actually demonstrates *Kenntnis
 semantic judgment — the harness marks it as "structurally grounded, pending review," not
 "correct."
 
-### 1.6 Replay is ours, not Temporal's and not Langfuse's
+### 1.6 Inbound MCP: explicit step session + step-scoped proxy (decided 2026-07-04)
+
+Two candidate shapes existed for exposing a runbook to MCP clients, and each alone enforces
+only half the contract:
+
+- **Steps-as-tools alone** (agent calls `begin_step`/`complete_step`): sequence and
+  verification hold, but between those calls the agent works with *its own* tools — the tool
+  allowlist is unenforced because the traffic never passes through the harness.
+- **Transparent wrap alone** (agent calls `calendar.create_event` unchanged; laufwise
+  intercepts): the allowlist binds, but the proxy must *infer* which step a call belongs to
+  and *guess* when postconditions should run. Inference is model-behavior-dependent control
+  flow — exactly what §1.2 forbids.
+
+**Decision: both halves, explicitly.** `rh serve <runbook.yaml> --wrap <downstream-mcp>...`
+runs one process that speaks MCP upstream (any client) and connects downstream as an MCP
+client. The session is a deterministic state machine:
+
+1. `begin_step` — gate: preconditions vs real state + approval. BLOCK halts the session.
+2. While a step is active, the proxy forwards **only the current step's allowlisted
+   downstream tools** — and via `tools/list_changed` they are the only tools *visible*.
+   Anything else is refused and traced (defense in depth).
+3. `complete_step` — verify: postconditions re-queried against the system of record, with
+   `verify` retry semantics. Step N+1 cannot begin until step N verified.
+
+The agent **requests** transitions; the engine **rules** on them — no inference anywhere, so
+§1.2 (deterministic control flow) survives contact with the distribution shape. A
+zero-prompt-change transparent wrap remains possible later as a degenerate single-step
+runbook ("guard mode"), explicitly the weaker per-call contract.
+
+### 1.7 Replay is ours, not Temporal's and not Langfuse's
 Langfuse is **observability-only** — it cannot resume a run. Temporal can resume but only when
 you adopt its execution model. We want deterministic replay **even in pure-local mode**, so a
 run is recorded as an **episode log**: an append-only sequence of
@@ -239,6 +268,7 @@ laufwise/
     engine/      # base.py (Engine protocol), local.py, temporal.py (later)
     state/       # base.py + providers/{files,sql,rest,memory}.py   ← the wedge
     adapters/    # base.py + raw_llm.py, mcp.py  (langgraph.py, pi.py later)
+    mcp/         # inbound MCP server: step session + scoped proxy (rh serve, §1.6)
     durable/     # base.py + sqlite.py
     trace/       # base.py + jsonl.py (OTEL exporter), otlp.py (Langfuse)
     approval/    # base.py + cli.py, webhook.py
@@ -256,6 +286,7 @@ CLI surface (unchanged from the memo — it's good):
 rh run   examples/vendor_onboarding.yaml --case cases/missing_tax_id.json
 rh test  examples/vendor_onboarding.yaml
 rh replay runs/episode_001.jsonl
+rh serve examples/booking.yaml --wrap "python calendar_mcp.py"   # inbound MCP (§1.6)
 ```
 
 Target demo — the harness blocks an unsafe action *and explains why*:

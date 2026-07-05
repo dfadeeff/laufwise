@@ -1,0 +1,27 @@
+runbook: mcp_booking
+version: 1
+risk: medium
+
+state:
+  slot:
+    provider: http
+    query: "{base}/slots"
+    extract: items.0.free
+  events:
+    provider: http
+    query: "{base}/events"
+    extract: items
+
+steps:
+  - id: book_slot
+    description: Book the interview slot via the calendar tools
+    preconditions:
+      - check: slot.exists == true
+        else: "slot is not free"
+    tools: [create_event]
+    postconditions:
+      - check: events.count >= 1
+        else: "no calendar event found — booking claim not verified"
+    verify:
+      retries: 2
+      backoff_s: 0.2

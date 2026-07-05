@@ -75,6 +75,15 @@ Core sentence: *Others run agents. This defines the process contract they must o
   documented path to `if/match/retry`/branching — *current lean: pure sequence v0*. The
   insolvency case may force branching (e.g. "if § 133 flag found, run deeper Kenntnis
   analysis"); add it deliberately, not by accident.
+- **C. Inbound MCP shape: DECIDED (2026-07-04) — explicit step session + step-scoped proxy.**
+  `rh serve <runbook> --wrap <mcp-server>...` exposes `begin_step`/`complete_step` control
+  tools plus ONLY the current step's allowlisted downstream tools (re-scoped via
+  `tools/list_changed` on every transition). The agent *requests* transitions; the engine
+  *rules* on them. Rejected alternatives: steps-as-tools alone (allowlist unenforced — tool
+  traffic never passes through the harness) and transparent wrap alone (step boundaries would
+  be *inferred* from traffic — model-dependent control flow, violating invariant #1). A
+  zero-prompt-change transparent wrap may ship later as a degenerate single-step runbook,
+  explicitly labeled the weaker per-call contract. See ARCHITECTURE.md §1.6.
 
 ## Repo conventions
 

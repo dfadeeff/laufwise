@@ -14,6 +14,35 @@ execute via adapter -> postcondition (vs real state) -> checkpoint + trace -> ne
 If a precondition fails, the step **blocks before any tool runs**.
 If a postcondition fails, the outcome is **rejected** even when the agent claims success.
 
+## Why this layer — four pillars
+
+**1. Independence: the auditor cannot be the executor.** A platform evaluating its own
+runs is grading its own homework, and an observability tool can only replay what the agent
+*said*. Only a layer that did not run the action can attest to it — the same reason
+financial audit is a separate industry from accounting. Laufwise's independence is
+concrete: it trusts neither the agent's claim, nor a proxy's log, nor the receiving
+service's signature — it re-derives the outcome from the system of record itself.
+
+**2. Grounded in the system of record, not in model output.** Evals score text. Laufwise
+re-queries the calendar, the ATS, the ERP — after every action. The claim is deliberately
+precise: the action was **permitted** (preconditions held against real state) and the
+outcome is **grounded** (postconditions verified against the system of record). Never
+"the judgment was correct" — semantic correctness stays with the human, via the approval
+gate.
+
+**3. Every action gets a state-verified receipt.** Signing a log proves a claim was
+*made*; laufwise proves the action *landed*. The receipt is the artifact: before-state
+hash → action → after-state evidence, chained into an append-only episode log. That is
+what audit — and the EU AI Act's logging, oversight, and post-market-monitoring
+obligations — actually demand: evidence produced at the moment of action, not
+reconstructed after the incident. Others notarize the claim; laufwise re-checks reality.
+
+**4. Drop-in via MCP.** `rh serve <runbook.yaml> --wrap <any-mcp-server>` puts the
+contract between any MCP client (Claude, Cursor, your own agent) and its tools. The agent
+sees only the current step's allowlisted tools, and a step completes only when its
+postconditions verify against the system of record. Adopt verification in an afternoon,
+without changing your agent.
+
 ## Quick start
 
 ```bash
@@ -112,17 +141,19 @@ process, unchanged. That's the test of a primitive.
   preconditions, tool allowlist, approval policy, execution, and postconditions.
 - **Check** -- a pure predicate over state (`docs.contains_all([...])`, `vendor.exists ==
   false`). Evaluated against the system of record, never against model text.
-- **StateProvider** -- the system of record. v0 ships `MemoryStateProvider` (a JSON fixture);
-  ERP/CRM/DB/MCP providers come later.
+- **StateProvider** -- the system of record. Shipped: `MemoryStateProvider` (a JSON fixture),
+  `HttpStateProvider` (any REST/JSON source, stdlib-only), `CompositeStateProvider` (routes
+  each binding to its declared provider). ERP/CRM/DB/MCP providers come later.
 - **Seams** -- `Engine`, `StateProvider`, `ExecutionAdapter`, `DurableStore`, `TraceSink`,
   `ApprovalGate`, `CheckEvaluator`. See [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Status
 
-v0 -- the first-run demo. Implemented: spec loader, check DSL, memory state provider, local
-engine, JSONL trace, OTEL trace sink, CLI. Stubbed: approval UI, execution adapters,
-`rh test` / `rh replay`, SQLite durable store, Temporal engine. Roadmap in
-[ARCHITECTURE.md](ARCHITECTURE.md).
+v0. Implemented: spec loader, check DSL, memory/http/composite state providers, local engine
+with verify retries, simulated + tool-registry execution adapters, JSONL trace, OTEL trace
+sink, inbound MCP step session (`rh serve --wrap`), CLI. Stubbed: approval UI (auto-approve),
+LLM execution adapter, `rh test` / `rh replay`, SQLite durable store, Temporal engine.
+Roadmap in [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ```bash
 pytest tests/ -v   # run the suite

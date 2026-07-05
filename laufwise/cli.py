@@ -13,7 +13,7 @@ from pathlib import Path
 import click
 from rich.console import Console
 
-from laufwise.adapters.base import SimulatedAdapter
+from laufwise.adapters.base import SimulatedAdapter, StubAdapter
 from laufwise.approval.base import AutoApprovalGate
 from laufwise.contract.evaluator import BuiltinEvaluator
 from laufwise.engine.base import StepStatus
@@ -102,6 +102,54 @@ def run(runbook: str, case_path: str, output_dir: str) -> None:
     console.print()
 
     raise SystemExit(1 if halted else 0)
+
+
+@cli.command()
+@click.argument("runbook", type=click.Path(exists=True, dir_okay=False))
+@click.option("--case", "case_path", type=click.Path(exists=True, dir_okay=False),
+              help="Optional case fixture (memory bindings + _params for http URLs).")
+@click.option("--wrap", "wrap_commands", multiple=True,
+              help="Downstream MCP server command to wrap (repeatable).")
+@click.option("--output-dir", default="runs", show_default=True)
+def serve(runbook: str, case_path: str | None, wrap_commands: tuple[str, ...], output_dir: str) -> None:
+    """Serve a runbook as an MCP step session wrapping downstream MCP servers (§1.6).
+
+    The connected agent calls begin_step / complete_step; between them only the current
+    step's allowlisted downstream tools are visible and forwarded.
+    """
+    try:
+        import asyncio
+
+        from laufwise.mcp.server import serve_stdio
+    except ImportError as exc:
+        raise click.ClickException(
+            f'rh serve requires the mcp extra: pip install "laufwise[mcp]" ({exc})'
+        ) from exc
+
+    spec = load_runbook(runbook)
+    fixture = json.loads(Path(case_path).read_text(encoding="utf-8")) if case_path else {}
+    provider = MemoryStateProvider(fixture)
+    declared = {b.provider for b in spec.state.values()}
+    state_provider = provider
+    if declared - {"memory"}:
+        providers = {"memory": provider}
+        if "http" in declared:
+            providers["http"] = HttpStateProvider(vars=provider.params)
+        state_provider = CompositeStateProvider(providers)
+
+    trace_path = _next_episode(Path(output_dir) / spec.runbook)
+    trace = JsonlTraceSink(trace_path)
+    engine = LocalEngine(
+        provider=state_provider,
+        evaluator=BuiltinEvaluator(),
+        trace=trace,
+        approval=AutoApprovalGate(),
+        adapter=StubAdapter(),  # session mode: the agent acts via the scoped proxy
+    )
+    try:
+        asyncio.run(serve_stdio(spec, engine, list(wrap_commands)))
+    finally:
+        trace.close()
 
 
 @cli.command()
