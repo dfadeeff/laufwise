@@ -29,3 +29,15 @@ class StepResult:
     expr: str | None = None
     blocked_tool: str | None = None
     state_hash: str | None = None
+
+    def trace_fields(self) -> dict[str, str | None]:
+        """The canonical trace-event shape for a step ruling — every driver (engine.run,
+        MCP session) emits exactly this, so episodes stay comparable across drive modes."""
+        return {
+            "step_id": self.step_id,
+            "status": self.status.value,
+            "reason": self.reason,
+            "expr": self.expr,
+            "blocked_tool": self.blocked_tool,
+            "state_hash": self.state_hash,
+        }

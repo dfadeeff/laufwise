@@ -189,14 +189,7 @@ class LocalEngine:
             result = self.run_step(spec, step)
             results.append(result)
             # 6. checkpoint + trace
-            self.trace.event(
-                step_id=result.step_id,
-                status=result.status.value,
-                reason=result.reason,
-                expr=result.expr,
-                blocked_tool=result.blocked_tool,
-                state_hash=result.state_hash,
-            )
+            self.trace.event(**result.trace_fields())
             if result.status in (StepStatus.BLOCK, StepStatus.STATE_UNAVAILABLE):
                 break
             if result.status is StepStatus.REJECT:

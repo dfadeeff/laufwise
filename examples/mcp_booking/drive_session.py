@@ -19,8 +19,8 @@ async def main(lie: bool):
     params = StdioServerParameters(
         command="rh",
         args=[
-            "serve", f"{SCRATCH}/session_runbook.yaml",
-            "--case", f"{SCRATCH}/session_case.json",
+            "serve", f"{SCRATCH}/booking.yaml",
+            "--case", f"{SCRATCH}/case.json",
             "--wrap", wrap,
             "--output-dir", f"{SCRATCH}/runs",
         ],

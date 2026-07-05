@@ -74,6 +74,23 @@ rh run examples/vendor_onboarding.yaml --case examples/cases/complete.json
   ✓ prepare_erp_draft
 ```
 
+## MCP: put the contract in front of any agent
+
+`rh serve` speaks MCP upstream (Claude, Cursor, any MCP client) and wraps your existing MCP
+servers downstream. The agent calls `begin_step` / `complete_step`; in between, only the
+current step's allowlisted tools are visible and forwarded. A step completes only when its
+postconditions verify against the system of record.
+
+```bash
+pip install -e ".[mcp]"
+rh serve examples/mcp_booking/booking.yaml \
+    --wrap "python examples/mcp_booking/calendar_mcp.py" \
+    --case examples/mcp_booking/case.json
+```
+
+See `examples/mcp_booking/` for a full walkthrough, including a dishonest downstream tool
+whose claimed success is REJECTed because the state never changed.
+
 ## What it does
 
 Every runbook step runs the same enforced loop:

@@ -212,14 +212,7 @@ class RunbookMcpServer:
     # --- trace: every ruling is part of the audit record ----------------------
     def _record(self, result: StepResult) -> None:
         self.results.append(result)
-        self.engine.trace.event(
-            step_id=result.step_id,
-            status=result.status.value,
-            reason=result.reason,
-            expr=result.expr,
-            blocked_tool=result.blocked_tool,
-            state_hash=result.state_hash,
-        )
+        self.engine.trace.event(**result.trace_fields())
 
     def _trace_refusal(self, tool: str, reason: str, step: StepSpec | None = None) -> None:
         self.engine.trace.event(

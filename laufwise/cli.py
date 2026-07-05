@@ -19,6 +19,7 @@ from laufwise.contract.evaluator import BuiltinEvaluator
 from laufwise.engine.base import StepStatus
 from laufwise.engine.local import LocalEngine
 from laufwise.spec.loader import load_runbook
+from laufwise.state.base import StateProvider
 from laufwise.state.composite import CompositeStateProvider
 from laufwise.state.http import HttpStateProvider
 from laufwise.state.memory import MemoryStateProvider
@@ -31,6 +32,21 @@ def _next_episode(run_dir: Path) -> Path:
     run_dir.mkdir(parents=True, exist_ok=True)
     n = len(list(run_dir.glob("episode_*.jsonl"))) + 1
     return run_dir / f"episode_{n:03d}.jsonl"
+
+
+def _build_state_provider(spec, fixture: dict) -> tuple[MemoryStateProvider, StateProvider]:
+    """Wire the state seam: memory always; other declared providers routed via composite.
+    Returns (memory_provider, state_provider) — the memory provider is also the demo
+    adapter's write target, so both are needed at the composition root."""
+    provider = MemoryStateProvider(fixture)
+    declared = {b.provider for b in spec.state.values()}
+    state_provider: StateProvider = provider
+    if declared - {"memory"}:
+        providers: dict[str, StateProvider] = {"memory": provider}
+        if "http" in declared:
+            providers["http"] = HttpStateProvider(vars=provider.params)
+        state_provider = CompositeStateProvider(providers)
+    return provider, state_provider
 
 
 @click.group()
@@ -48,15 +64,8 @@ def run(runbook: str, case_path: str, output_dir: str) -> None:
     spec = load_runbook(runbook)
     fixture = json.loads(Path(case_path).read_text(encoding="utf-8"))
 
-    provider = MemoryStateProvider(fixture)
     # Bindings choose their provider; the case fixture's _params template http URLs.
-    declared = {b.provider for b in spec.state.values()}
-    state_provider = provider
-    if declared - {"memory"}:
-        providers = {"memory": provider}
-        if "http" in declared:
-            providers["http"] = HttpStateProvider(vars=provider.params)
-        state_provider = CompositeStateProvider(providers)
+    provider, state_provider = _build_state_provider(spec, fixture)
     trace_path = _next_episode(Path(output_dir) / spec.runbook)
     trace = JsonlTraceSink(trace_path)
     engine = LocalEngine(
@@ -128,14 +137,7 @@ def serve(runbook: str, case_path: str | None, wrap_commands: tuple[str, ...], o
 
     spec = load_runbook(runbook)
     fixture = json.loads(Path(case_path).read_text(encoding="utf-8")) if case_path else {}
-    provider = MemoryStateProvider(fixture)
-    declared = {b.provider for b in spec.state.values()}
-    state_provider = provider
-    if declared - {"memory"}:
-        providers = {"memory": provider}
-        if "http" in declared:
-            providers["http"] = HttpStateProvider(vars=provider.params)
-        state_provider = CompositeStateProvider(providers)
+    _, state_provider = _build_state_provider(spec, fixture)
 
     trace_path = _next_episode(Path(output_dir) / spec.runbook)
     trace = JsonlTraceSink(trace_path)
