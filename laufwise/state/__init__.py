@@ -4,10 +4,10 @@ from laufwise.state.http import HttpStateProvider
 from laufwise.state.memory import MemoryStateProvider
 
 __all__ = [
-    "StateProvider",
-    "StateUnavailable",
-    "StateView",
     "CompositeStateProvider",
     "HttpStateProvider",
     "MemoryStateProvider",
+    "StateProvider",
+    "StateUnavailable",
+    "StateView",
 ]

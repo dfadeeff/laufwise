@@ -5,4 +5,4 @@ from laufwise.adapters.base import (
     ToolNotAllowed,
 )
 
-__all__ = ["ExecutionAdapter", "StubAdapter", "SimulatedAdapter", "ToolNotAllowed"]
+__all__ = ["ExecutionAdapter", "SimulatedAdapter", "StubAdapter", "ToolNotAllowed"]

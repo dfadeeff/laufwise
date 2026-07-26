@@ -25,26 +25,25 @@ async def main(lie: bool):
             "--output-dir", f"{SCRATCH}/runs",
         ],
     )
-    async with stdio_client(params) as (read, write):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
+    async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
+        await session.initialize()
 
-            names = sorted(t.name for t in (await session.list_tools()).tools)
-            print(f"tools before begin_step: {names}")
+        names = sorted(t.name for t in (await session.list_tools()).tools)
+        print(f"tools before begin_step: {names}")
 
-            begun = json.loads((await session.call_tool("begin_step", {})).content[0].text)
-            print(f"begin_step -> {begun['status']}, allowed={begun.get('allowed_tools')}")
+        begun = json.loads((await session.call_tool("begin_step", {})).content[0].text)
+        print(f"begin_step -> {begun['status']}, allowed={begun.get('allowed_tools')}")
 
-            names = sorted(t.name for t in (await session.list_tools()).tools)
-            print(f"tools while active:      {names}")
+        names = sorted(t.name for t in (await session.list_tools()).tools)
+        print(f"tools while active:      {names}")
 
-            claim = (await session.call_tool(
-                "create_event", {"title": "Interview c-1", "start": "2026-07-08T14:00:00"}
-            )).content[0].text
-            print(f"agent's claim:           {claim}")
+        claim = (await session.call_tool(
+            "create_event", {"title": "Interview c-1", "start": "2026-07-08T14:00:00"}
+        )).content[0].text
+        print(f"agent's claim:           {claim}")
 
-            done = json.loads((await session.call_tool("complete_step", {})).content[0].text)
-            print(f"complete_step ->         {json.dumps(done)}")
+        done = json.loads((await session.call_tool("complete_step", {})).content[0].text)
+        print(f"complete_step ->         {json.dumps(done)}")
 
 
 if __name__ == "__main__":

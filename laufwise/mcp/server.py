@@ -15,6 +15,7 @@ part of the audit record, not just an error string.
 
 from __future__ import annotations
 
+import contextlib
 import json
 from typing import Any
 
@@ -240,10 +241,10 @@ class RunbookMcpServer:
         )
 
     async def _notify_tools_changed(self) -> None:
-        try:
+        # No live session context (e.g. a handler invoked directly in tests) — re-scoping is
+        # a notification, so its absence must not break the transition it accompanies.
+        with contextlib.suppress(LookupError, RuntimeError):
             await self.server.request_context.session.send_tool_list_changed()
-        except (LookupError, RuntimeError):
-            pass  # no live session context (e.g. direct handler invocation in tests)
 
 
 async def connect_downstream(stack, commands: list[str]) -> dict[str, tuple[Any, types.Tool]]:
