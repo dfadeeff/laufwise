@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from laufwise.adapters.base import (
     SimulatedAdapter,
@@ -353,7 +354,9 @@ def test_binding_query_and_params_reach_provider(tmp_path):
 
 
 def test_on_fail_unknown_mode_is_rejected():
-    with pytest.raises(Exception):
+    # Specifically a schema rejection — a blind `Exception` here would also pass on a typo
+    # in the constructor call, which is the opposite of what this asserts.
+    with pytest.raises(ValidationError):
         StepSpec(id="s", on_fail="continue")
 
 

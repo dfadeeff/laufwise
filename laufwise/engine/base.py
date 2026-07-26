@@ -4,10 +4,10 @@ TemporalEngine are interchangeable backends for the same per-step contract."""
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 
 
-class StepStatus(str, Enum):
+class StepStatus(StrEnum):
     OK = "ok"          # all conditions satisfied against real state
     # a gate refused the step: failed precondition, tool outside the allowlist, or approval
     # denied — in every case the declared tool was not executed by the engine. Adapters that

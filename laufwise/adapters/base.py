@@ -9,7 +9,8 @@ come next.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
+from collections.abc import Callable
 
 from laufwise.spec.models import StepSpec
 

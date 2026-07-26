@@ -9,11 +9,11 @@ from laufwise.spec.models import (
 )
 
 __all__ = [
-    "load_runbook",
-    "RunbookSpec",
-    "StepSpec",
-    "CheckSpec",
-    "StateBinding",
     "ApprovalSpec",
+    "CheckSpec",
     "ExecuteSpec",
+    "RunbookSpec",
+    "StateBinding",
+    "StepSpec",
+    "load_runbook",
 ]

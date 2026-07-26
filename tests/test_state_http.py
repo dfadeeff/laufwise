@@ -138,5 +138,7 @@ def test_composite_routes_by_binding_provider(server):
 
 def test_composite_unregistered_provider_is_config_error():
     composite = CompositeStateProvider({"memory": MemoryStateProvider({})})
-    with pytest.raises(ValueError, match="no such\nStateProvider|no such StateProvider"):
+    # The message is built from implicitly-concatenated f-strings, so it renders with a
+    # space — the old alternation carried a dead `\n` branch and read as an intentional regex.
+    with pytest.raises(ValueError, match="no such StateProvider"):
         composite.query("x", params={"provider": "salesforce"})
