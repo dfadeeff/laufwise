@@ -106,6 +106,12 @@ Every runbook step runs the same enforced loop:
 
 The control flow is deterministic Python. The LLM only acts inside step 4.
 
+A check that cannot be evaluated is never treated as a check that passed. Malformed checks
+and undeclared state bindings are rejected at load — `rh test` validates every expression
+statically, so a typo in a *post*condition surfaces before the step's tool runs rather than
+after it. Faults that only appear against real state rule as `CHECK_ERROR`: the step halts,
+the outcome is recorded as unverified, and the run never crashes out of its own audit trail.
+
 ## What it doesn't do
 
 - **Not observability.** Laufwise is not a tracer, dashboard, or annotation queue.
@@ -166,11 +172,12 @@ process, unchanged. That's the test of a primitive.
 
 ## Status
 
-v0. Implemented: spec loader, check DSL, memory/http/composite state providers, local engine
-with verify retries and `on_fail: goto` routing (bounded, REJECT-only), simulated +
-tool-registry execution adapters, JSONL trace, OTEL trace sink, inbound MCP step session
-(`rh serve --wrap`), CLI. Stubbed: approval UI (auto-approve), LLM execution adapter,
-`on_fail: retry/compensate`, `rh test` / `rh replay`, SQLite durable store, Temporal engine.
+v0. Implemented: spec loader with load-time check validation, total check DSL,
+memory/http/composite state providers, local engine with verify retries and `on_fail: goto`
+routing (bounded, REJECT-only), simulated + tool-registry execution adapters, JSONL trace,
+OTEL trace sink, inbound MCP step session (`rh serve --wrap`), CLI. Stubbed: approval UI
+(auto-approve), LLM execution adapter, `on_fail: retry/compensate`, `rh replay`, SQLite
+durable store, Temporal engine.
 Roadmap in [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ```bash

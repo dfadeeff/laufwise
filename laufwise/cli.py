@@ -1,7 +1,7 @@
 """rh — the Laufwise CLI. Composition root: wires the seams together and renders results.
 
     rh run    <runbook.yaml> --case <case.json>
-    rh test   <runbook.yaml>   (stub)
+    rh test   <runbook.yaml>            (static: schema + every check expression)
     rh replay <episode.jsonl>   (stub)
 """
 
@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 
 import click
+from pydantic import ValidationError
 from rich.console import Console
 
 from laufwise.adapters.base import SimulatedAdapter, StubAdapter
@@ -18,7 +19,7 @@ from laufwise.approval.base import AutoApprovalGate
 from laufwise.contract.evaluator import BuiltinEvaluator
 from laufwise.engine.base import StepStatus
 from laufwise.engine.local import LocalEngine
-from laufwise.spec.loader import load_runbook
+from laufwise.spec.loader import RunbookValidationError, load_runbook
 from laufwise.state.base import StateProvider
 from laufwise.state.composite import CompositeStateProvider
 from laufwise.state.http import HttpStateProvider
@@ -32,6 +33,26 @@ def _next_episode(run_dir: Path) -> Path:
     run_dir.mkdir(parents=True, exist_ok=True)
     n = len(list(run_dir.glob("episode_*.jsonl"))) + 1
     return run_dir / f"episode_{n:03d}.jsonl"
+
+
+def _load_or_exit(runbook: str):
+    """Load a runbook, reporting an invalid one as a clean CLI failure.
+
+    A broken check is a config error, so it deserves the same treatment as a bad flag — a
+    readable message and exit 1, not a traceback. Every entry point loads through here so
+    no runbook reaches an engine without its checks having been validated first.
+    """
+    try:
+        return load_runbook(runbook)
+    except (RunbookValidationError, ValidationError) as exc:
+        kind = "" if isinstance(exc, RunbookValidationError) else "  (schema)"
+        console.print()
+        console.print("  [bold white on magenta] INVALID [/bold white on magenta]  "
+                      f"[bold]{Path(runbook).name}[/bold]{kind}")
+        for line in str(exc).splitlines():
+            console.print(f"    {line}")
+        console.print()
+        raise SystemExit(1) from None
 
 
 def _build_state_provider(spec, fixture: dict) -> tuple[MemoryStateProvider, StateProvider]:
@@ -61,7 +82,7 @@ def cli() -> None:
 @click.option("--output-dir", default="runs", show_default=True)
 def run(runbook: str, case_path: str, output_dir: str) -> None:
     """Run a runbook against a case fixture."""
-    spec = load_runbook(runbook)
+    spec = _load_or_exit(runbook)
     fixture = json.loads(Path(case_path).read_text(encoding="utf-8"))
 
     # Bindings choose their provider; the case fixture's _params template http URLs.
@@ -108,6 +129,14 @@ def run(runbook: str, case_path: str, output_dir: str) -> None:
             console.print(f"  [bold black on yellow] STATE UNAVAILABLE [/bold black on yellow]  [bold]{r.step_id}[/bold]")
             console.print(f"    could not resolve state: {r.reason}")
             console.print(f"    trace: [dim]{trace_path}[/dim]")
+        elif r.status is StepStatus.CHECK_ERROR:
+            halted = True
+            console.print()
+            console.print(f"  [bold white on magenta] CHECK ERROR [/bold white on magenta]  [bold]{r.step_id}[/bold]")
+            console.print(f"    broken check: [yellow]{r.expr}[/yellow]")
+            console.print(f"    {r.reason}")
+            console.print("    [dim]the outcome is UNVERIFIED — this is a config error, fix the check[/dim]")
+            console.print(f"    trace: [dim]{trace_path}[/dim]")
     console.print()
 
     raise SystemExit(1 if halted else 0)
@@ -135,7 +164,7 @@ def serve(runbook: str, case_path: str | None, wrap_commands: tuple[str, ...], o
             f'rh serve requires the mcp extra: pip install "laufwise[mcp]" ({exc})'
         ) from exc
 
-    spec = load_runbook(runbook)
+    spec = _load_or_exit(runbook)
     fixture = json.loads(Path(case_path).read_text(encoding="utf-8")) if case_path else {}
     _, state_provider = _build_state_provider(spec, fixture)
 
@@ -157,9 +186,18 @@ def serve(runbook: str, case_path: str | None, wrap_commands: tuple[str, ...], o
 @cli.command()
 @click.argument("runbook", type=click.Path(exists=True, dir_okay=False))
 def test(runbook: str) -> None:
-    """Validate a runbook spec (stub — full case-matrix testing comes later)."""
-    spec = load_runbook(runbook)
-    console.print(f"[green]ok[/green] {spec.runbook}: {len(spec.steps)} steps, schema valid")
+    """Validate a runbook: schema, goto targets, and every check expression.
+
+    Static only — no state is queried and no step runs. It answers "will this runbook's
+    checks actually evaluate?", which used to be answerable only by running it and finding
+    out after a tool had already fired.
+    """
+    spec = _load_or_exit(runbook)
+    checks = sum(len(s.preconditions) + len(s.postconditions) for s in spec.steps)
+    console.print(
+        f"[green]ok[/green] {spec.runbook}: {len(spec.steps)} steps, "
+        f"{checks} checks validated against {len(spec.state)} state bindings"
+    )
 
 
 @cli.command()

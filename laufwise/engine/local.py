@@ -70,6 +70,27 @@ class LocalEngine:
         blob = json.dumps(repr_, sort_keys=True, default=str)
         return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
+    def _check_error(
+        self, step: StepSpec, expr: str, exc: Exception, state_hash: str | None
+    ) -> StepResult:
+        """Turn a broken check into a traced ruling.
+
+        The catch upstream is deliberately broad. `CheckEvaluator` is a seam — a CEL or
+        third-party evaluator may raise anything at all — and the invariant being defended
+        is that no evaluator fault escapes as an untraced crash. That matters most in
+        `verify_step`, where the step's tool has ALREADY run: crashing there loses the
+        ruling on a write that really happened, which is precisely the failure this harness
+        exists to prevent. Broken-and-recorded beats broken-and-silent.
+        """
+        return StepResult(
+            step.id,
+            StepStatus.CHECK_ERROR,
+            reason=f"{type(exc).__name__}: {exc}",
+            expr=expr,
+            blocked_tool=self._blocked_tool(step),
+            state_hash=state_hash,
+        )
+
     def _approval_required(self, spec: RunbookSpec, step: StepSpec) -> bool:
         if step.approval is None:
             return False
@@ -104,7 +125,10 @@ class LocalEngine:
 
         # 1. preconditions (vs real state) -> BLOCK before any tool runs
         for check in step.preconditions:
-            res = self.evaluator.evaluate(check.expr, pre_state)
+            try:
+                res = self.evaluator.evaluate(check.expr, pre_state)
+            except Exception as exc:  # noqa: BLE001 — see _check_error
+                return self._check_error(step, check.expr, exc, pre_hash), pre_hash
             if not res.ok:
                 return StepResult(
                     step.id, StepStatus.BLOCK,
@@ -171,7 +195,13 @@ class LocalEngine:
             post_hash = self._state_hash(post_state)
             failure = None
             for check in step.postconditions:
-                res = self.evaluator.evaluate(check.expr, post_state)
+                try:
+                    res = self.evaluator.evaluate(check.expr, post_state)
+                except Exception as exc:  # noqa: BLE001 — see _check_error
+                    # Returned, not retried: a broken check is a config fault, and no amount
+                    # of re-reading state will make it parse. The tool has already run, so
+                    # this ruling is the only record that the outcome went unverified.
+                    return self._check_error(step, check.expr, exc, post_hash)
                 if not res.ok:
                     failure = StepResult(
                         step.id, StepStatus.REJECT,
@@ -216,7 +246,11 @@ class LocalEngine:
             results.append(result)
             # 6. checkpoint + trace
             self.trace.event(**result.trace_fields())
-            if result.status in (StepStatus.BLOCK, StepStatus.STATE_UNAVAILABLE):
+            if result.status in (
+                StepStatus.BLOCK,
+                StepStatus.STATE_UNAVAILABLE,
+                StepStatus.CHECK_ERROR,
+            ):
                 break
             if result.status is StepStatus.REJECT:
                 target, halt_reason = self.route_reject(spec, step, visits)

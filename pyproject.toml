@@ -59,9 +59,12 @@ line-length = 100
 # the project, not of whichever ruff the runner happened to resolve.
 #   E4/E7/E9,F  ruff's classic default: imports, statements, syntax, pyflakes
 #   B           bugbear — real bug shapes (e.g. blind `except Exception` assertions)
+#   BLE         blind-except — the engine has two deliberate `except Exception` catches
+#               (evaluator faults must never escape untraced); enabling the rule makes each
+#               one an explicit, annotated decision rather than an unremarked default
 #   SIM         simplification
 #   UP          pyupgrade, floored at the 3.11 baseline in requires-python
 #   RUF         ruff's own rules
 # Deliberately NOT enabled: E501 (line-too-long) and W292 — `line-length` above governs
 # formatting intent, and neither earns a CI failure here.
-select = ["E4", "E7", "E9", "F", "B", "SIM", "UP", "RUF"]
+select = ["E4", "E7", "E9", "F", "B", "BLE", "SIM", "UP", "RUF"]

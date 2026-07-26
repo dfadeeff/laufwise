@@ -19,6 +19,12 @@ class StepStatus(StrEnum):
     # halts as its own outcome (CLAUDE.md invariant #4: first-class, never a crash, and
     # never silently evaluated as empty state)
     STATE_UNAVAILABLE = "state_unavailable"
+    # the check itself is broken (unparseable, undeclared binding, incomparable values), so
+    # no verdict about the world can be drawn from it. Same reasoning as STATE_UNAVAILABLE:
+    # "the check could not run" is NOT "the check passed", and it is not a crash either — a
+    # step whose tool already ran must still produce a traced ruling. Never routed by
+    # on_fail: a broken check is a config fault, and retrying or rerouting cannot fix it.
+    CHECK_ERROR = "check_error"
 
 
 @dataclass
