@@ -188,7 +188,8 @@ class RunbookMcpServer:
                     self.engine.trace.event(step_id=step.id, status="halt", reason=halt_reason)
                 self.halted = result
         else:
-            # STATE_UNAVAILABLE ends the session: the outcome is unverified.
+            # STATE_UNAVAILABLE / CHECK_ERROR end the session: the outcome is unverified,
+            # and on_fail routing applies to REJECT only.
             self.halted = result
         await self._notify_tools_changed()
 
