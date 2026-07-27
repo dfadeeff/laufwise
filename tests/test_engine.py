@@ -201,6 +201,98 @@ def test_state_unavailable_is_first_class_halt(tmp_path):
     assert len(results) == 1  # run halted
 
 
+# --- a broken check rules and traces; it never crashes the run ------------------------
+# Load-time validation (test_loader.py) catches these before a run starts. This is the
+# backstop for the paths it cannot cover: specs built in code, evaluators with different
+# static rules, and faults that only appear against real state (incomparable values).
+
+
+def _broken_check_spec(where: str) -> RunbookSpec:
+    check = CheckSpec(expr="rec.count > \"abc\"")  # parses; incomparable at runtime
+    step = StepSpec(
+        id="s1",
+        tools=["create_rec"],
+        execute=ExecuteSpec(adapter="registry", tool="create_rec"),
+        preconditions=[check] if where == "pre" else [],
+        postconditions=[check] if where == "post" else [],
+    )
+    return _single_step_spec(step, state={"rec": StateBinding(provider="memory")})
+
+
+def test_broken_precondition_is_check_error_not_a_crash(tmp_path):
+    adapter = _RecordingAdapter()
+    eng = _engine(tmp_path / "ep.jsonl", MemoryStateProvider({"rec": []}), adapter=adapter)
+    results = eng.run(_broken_check_spec("pre"))
+    eng.trace.close()
+
+    assert results[0].status is StepStatus.CHECK_ERROR
+    assert results[0].expr == 'rec.count > "abc"'
+    assert adapter.calls == []  # a broken gate must not let the tool run
+
+
+def test_broken_postcondition_rules_after_the_tool_already_ran(tmp_path):
+    # The audit case, at the worst moment: the write has landed and the check that should
+    # judge it is broken. Crashing here would lose the ruling on a real state change, so
+    # the step must still produce a traced CHECK_ERROR — unverified, and recorded as such.
+    trace_path = tmp_path / "ep.jsonl"
+    adapter = _RecordingAdapter()
+    eng = _engine(trace_path, MemoryStateProvider({"rec": []}), adapter=adapter)
+    results = eng.run(_broken_check_spec("post"))
+    eng.trace.close()
+
+    assert adapter.calls == ["s1"]  # the tool DID run
+    assert results[0].status is StepStatus.CHECK_ERROR
+    assert "CheckEvalError" in results[0].reason
+
+    lines = [json.loads(line) for line in trace_path.read_text().splitlines()]
+    assert len(lines) == 1
+    assert lines[0]["status"] == "check_error"
+    assert lines[0]["expr"] == 'rec.count > "abc"'
+
+
+def test_check_error_halts_and_is_never_routed_by_on_fail(tmp_path):
+    # on_fail applies to REJECT only. A broken check is a config fault: rerouting it would
+    # let a runbook keep walking on a contract it cannot actually evaluate.
+    broken = CheckSpec(expr="rec.count > \"abc\"")
+    spec = RunbookSpec(
+        runbook="t",
+        state={"rec": StateBinding(provider="memory")},
+        steps=[
+            StepSpec(id="s1", postconditions=[broken], on_fail="goto(review)"),
+            StepSpec(id="review", description="should never be reached"),
+        ],
+    )
+    eng = _engine(tmp_path / "ep.jsonl", MemoryStateProvider({"rec": []}))
+    results = eng.run(spec)
+    eng.trace.close()
+
+    assert [r.status for r in results] == [StepStatus.CHECK_ERROR]
+    assert len(results) == 1  # halted; 'review' never started
+
+
+def test_evaluator_raising_an_arbitrary_error_still_rules(tmp_path):
+    # The CheckEvaluator seam accepts third-party impls, which may raise anything. The
+    # invariant is that no evaluator fault escapes as an untraced crash.
+    class ExplodingEvaluator:
+        def evaluate(self, expr, state):
+            raise RuntimeError("evaluator backend is down")
+
+    step = StepSpec(id="s1", preconditions=[CheckSpec(expr="rec.exists == true")])
+    spec = _single_step_spec(step, state={"rec": StateBinding(provider="memory")})
+    provider = MemoryStateProvider({"rec": []})
+    eng = LocalEngine(
+        provider=provider,
+        evaluator=ExplodingEvaluator(),
+        trace=JsonlTraceSink(tmp_path / "ep.jsonl"),
+        approval=AutoApprovalGate(),
+        adapter=StubAdapter(),
+    )
+    results = eng.run(spec)
+    eng.trace.close()
+    assert results[0].status is StepStatus.CHECK_ERROR
+    assert results[0].reason == "RuntimeError: evaluator backend is down"
+
+
 # --- non-circular execution: the tool impl decides state, never the declared effect ---
 
 
