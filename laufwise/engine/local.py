@@ -15,7 +15,7 @@ import time
 from laufwise.adapters.base import ExecutionAdapter, ToolNotAllowed
 from laufwise.approval.base import ApprovalGate
 from laufwise.contract.evaluator import CheckEvaluator
-from laufwise.engine.base import StepResult, StepStatus
+from laufwise.engine.base import StepResult, StepStatus, tool_call_record
 from laufwise.spec.models import RunbookSpec, StepSpec
 from laufwise.state.base import StateProvider, StateUnavailable, StateView
 from laufwise.trace.base import TraceSink
@@ -71,7 +71,9 @@ class LocalEngine:
         return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
     def _check_error(
-        self, step: StepSpec, expr: str, exc: Exception, state_hash: str | None
+        self, step: StepSpec, expr: str, exc: Exception,
+        before: str | None, after: str | None = None,
+        tool_calls: list[dict] | None = None,
     ) -> StepResult:
         """Turn a broken check into a traced ruling.
 
@@ -88,7 +90,9 @@ class LocalEngine:
             reason=f"{type(exc).__name__}: {exc}",
             expr=expr,
             blocked_tool=self._blocked_tool(step),
-            state_hash=state_hash,
+            state_hash_before=before,
+            state_hash_after=after,
+            tool_calls=tool_calls,
         )
 
     def _approval_required(self, spec: RunbookSpec, step: StepSpec) -> bool:
@@ -128,12 +132,15 @@ class LocalEngine:
             try:
                 res = self.evaluator.evaluate(check.expr, pre_state)
             except Exception as exc:  # noqa: BLE001 — see _check_error
-                return self._check_error(step, check.expr, exc, pre_hash), pre_hash
+                return self._check_error(
+                    step, check.expr, exc, pre_hash, tool_calls=[]
+                ), pre_hash
             if not res.ok:
                 return StepResult(
                     step.id, StepStatus.BLOCK,
                     reason=check.reason or res.detail,
-                    expr=check.expr, blocked_tool=self._blocked_tool(step), state_hash=pre_hash,
+                    expr=check.expr, blocked_tool=self._blocked_tool(step),
+                    state_hash_before=pre_hash, tool_calls=[],
                 ), pre_hash
 
         # 2. tool allowlist — asserted by the engine itself; adapters also refuse
@@ -142,7 +149,8 @@ class LocalEngine:
             return StepResult(
                 step.id, StepStatus.BLOCK,
                 reason="tool_not_allowed",
-                blocked_tool=step.execute.tool, state_hash=pre_hash,
+                blocked_tool=step.execute.tool,
+                state_hash_before=pre_hash, tool_calls=[],
             ), pre_hash
 
         # 3. approval gate — a denial BLOCKs before the tool runs.
@@ -152,7 +160,8 @@ class LocalEngine:
                 return StepResult(
                     step.id, StepStatus.BLOCK,
                     reason="approval_denied",
-                    blocked_tool=self._blocked_tool(step), state_hash=pre_hash,
+                    blocked_tool=self._blocked_tool(step),
+                    state_hash_before=pre_hash, tool_calls=[],
                 ), pre_hash
 
         return None, pre_hash
@@ -165,19 +174,38 @@ class LocalEngine:
         # 4. execute via adapter (the only place the model acts; allowlist-bounded).
         #    A ToolNotAllowed raised DURING execution (an adapter refusing a runtime tool
         #    attempt) is a traced halt, never a crash.
+        tool_calls: list[dict] = []
         if step.execute is not None:
             try:
-                self.adapter.execute(step, allowlist=step.tools)
+                outcome = self.adapter.execute(step, allowlist=step.tools)
             except ToolNotAllowed:
                 return StepResult(
                     step.id, StepStatus.BLOCK,
                     reason="tool_not_allowed",
-                    blocked_tool=step.execute.tool, state_hash=pre_hash,
+                    blocked_tool=step.execute.tool,
+                    state_hash_before=pre_hash,
+                    # The refused attempt is part of the record: an allowlist that fired is
+                    # evidence, not a non-event.
+                    tool_calls=[tool_call_record(step.execute.tool, step.execute.args, ok=False)],
+                )
+            if step.execute.tool is not None:
+                tool_calls.append(
+                    tool_call_record(
+                        step.execute.tool,
+                        step.execute.args,
+                        ok=getattr(outcome, "ok", True),
+                    )
                 )
 
-        return self.verify_step(spec, step)
+        return self.verify_step(spec, step, before=pre_hash, tool_calls=tool_calls)
 
-    def verify_step(self, spec: RunbookSpec, step: StepSpec) -> StepResult:
+    def verify_step(
+        self,
+        spec: RunbookSpec,
+        step: StepSpec,
+        before: str | None = None,
+        tool_calls: list[dict] | None = None,
+    ) -> StepResult:
         # 5. postconditions vs state RE-RESOLVED after execution -> REJECT even if the agent
         #    claimed success. Re-resolving is what makes this a check on reality, not a claim.
         #    State lost after the action is still STATE_UNAVAILABLE: the outcome is unverified,
@@ -190,7 +218,10 @@ class LocalEngine:
             try:
                 post_state = self._resolve_state(spec)
             except StateUnavailable as exc:
-                failure = StepResult(step.id, StepStatus.STATE_UNAVAILABLE, reason=str(exc))
+                failure = StepResult(
+                    step.id, StepStatus.STATE_UNAVAILABLE, reason=str(exc),
+                    state_hash_before=before, tool_calls=tool_calls,
+                )
                 continue
             post_hash = self._state_hash(post_state)
             failure = None
@@ -201,16 +232,24 @@ class LocalEngine:
                     # Returned, not retried: a broken check is a config fault, and no amount
                     # of re-reading state will make it parse. The tool has already run, so
                     # this ruling is the only record that the outcome went unverified.
-                    return self._check_error(step, check.expr, exc, post_hash)
+                    return self._check_error(
+                        step, check.expr, exc, before, post_hash, tool_calls
+                    )
                 if not res.ok:
                     failure = StepResult(
                         step.id, StepStatus.REJECT,
                         reason=check.reason or res.detail,
-                        expr=check.expr, state_hash=post_hash,
+                        expr=check.expr,
+                        state_hash_before=before, state_hash_after=post_hash,
+                        tool_calls=tool_calls,
                     )
                     break
             if failure is None:
-                return StepResult(step.id, StepStatus.OK, state_hash=post_hash)
+                return StepResult(
+                    step.id, StepStatus.OK,
+                    state_hash_before=before, state_hash_after=post_hash,
+                    tool_calls=tool_calls,
+                )
         return failure  # the last attempt's REJECT or STATE_UNAVAILABLE stands
 
     @staticmethod

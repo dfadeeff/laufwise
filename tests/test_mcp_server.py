@@ -148,6 +148,35 @@ def test_lying_tool_is_rejected_and_session_halts(tmp_path):
     asyncio.run(_drive(record, honest=False, scenario=scenario))
 
 
+def test_proxied_calls_land_in_the_receipt_not_just_refusals(tmp_path):
+    # Tracing only refusals would leave the audit record able to show what the harness
+    # stopped but not what it let through. "What the agent actually did" is the half a
+    # receipt exists to prove.
+    trace_path = tmp_path / "ep.jsonl"
+    record = {"slot": {"free": True}, "event": None, "_trace_path": trace_path}
+
+    async def scenario(client, runbook):
+        await client.call_tool(BEGIN_STEP, {})
+        await client.call_tool("create_event", {"title": "Interview c-1"})
+        await client.call_tool("delete_event", {"title": "x"})  # not allowlisted -> refused
+        await client.call_tool(COMPLETE_STEP, {})
+
+        ruling = runbook.results[-1]
+        assert [c["tool"] for c in ruling.tool_calls] == ["create_event"]
+        assert ruling.state_hash_before and ruling.state_hash_after
+        assert ruling.state_hash_before != ruling.state_hash_after  # the write landed
+
+    asyncio.run(_drive(record, honest=True, scenario=scenario))
+
+    events = [json.loads(line) for line in trace_path.read_text().splitlines()]
+    by_status = {e["status"] for e in events}
+    assert "tool_call" in by_status  # the allowed call
+    assert "refused" in by_status  # and the blocked one
+    allowed = next(e for e in events if e["status"] == "tool_call")
+    assert allowed["tool"] == "create_event"
+    assert "Interview c-1" not in trace_path.read_text()  # args hashed, never verbatim
+
+
 def test_reject_with_goto_routes_session_instead_of_halting(tmp_path):
     # The write step's postcondition fails (lying downstream tool), but on_fail=goto routes
     # the session to the escalation step instead of ending it — same rule as engine.run.

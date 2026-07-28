@@ -23,7 +23,7 @@ import anyio
 import mcp.types as types
 from mcp.server.lowlevel import Server
 
-from laufwise.engine.base import StepResult, StepStatus
+from laufwise.engine.base import StepResult, StepStatus, tool_call_record
 from laufwise.engine.local import LocalEngine
 from laufwise.spec.models import RunbookSpec, StepSpec
 
@@ -56,6 +56,9 @@ class RunbookMcpServer:
         self._index_of = {step.id: i for i, step in enumerate(spec.steps)}
         self.visits: dict[str, int] = {}
         self.step_active = False
+        # Receipt material for the step currently in flight, reset at every begin_step.
+        self._step_tool_calls: list[dict] = []
+        self._pre_hash: str | None = None
         self.halted: StepResult | None = None
         self.results: list[StepResult] = []
         self.server: Server = Server(f"laufwise:{spec.runbook}")
@@ -141,7 +144,9 @@ class RunbookMcpServer:
         if self.step_active:
             return _text({"refused": f"step {step.id!r} already active — call {COMPLETE_STEP}"})
 
-        failure, _ = await anyio.to_thread.run_sync(self.engine.gate_step, self.spec, step)
+        failure, pre_hash = await anyio.to_thread.run_sync(
+            self.engine.gate_step, self.spec, step
+        )
         if failure is not None:
             self._record(failure)
             self.halted = failure
@@ -155,6 +160,8 @@ class RunbookMcpServer:
             })
 
         self.step_active = True
+        self._pre_hash = pre_hash
+        self._step_tool_calls = []
         self.visits[step.id] = self.visits.get(step.id, 0) + 1
         await self._notify_tools_changed()
         return _text({
@@ -171,7 +178,9 @@ class RunbookMcpServer:
         if not self.step_active or step is None:
             return _text({"refused": f"no active step — call {BEGIN_STEP} first", **self._status()})
 
-        result = await anyio.to_thread.run_sync(self.engine.verify_step, self.spec, step)
+        result = await anyio.to_thread.run_sync(
+            self.engine.verify_step, self.spec, step, self._pre_hash, self._step_tool_calls
+        )
         self._record(result)
         self.step_active = False
         routed_to: str | None = None
@@ -222,6 +231,10 @@ class RunbookMcpServer:
             })
         session, _tool = self.downstream[name]
         result = await session.call_tool(name, arguments)
+        # An ALLOWED call is evidence too. Tracing only refusals would leave the audit
+        # record able to show what the harness stopped but not what it let through — and
+        # "what the agent actually did" is the half a receipt exists to prove.
+        self._record_tool_call(step, name, arguments, ok=not getattr(result, "isError", False))
         # Full-fidelity passthrough: preserve structured output so the downstream tool's
         # declared outputSchema still validates on our side of the proxy.
         if result.structuredContent is not None:
@@ -232,6 +245,19 @@ class RunbookMcpServer:
     def _record(self, result: StepResult) -> None:
         self.results.append(result)
         self.engine.trace.event(**result.trace_fields())
+
+    def _record_tool_call(
+        self, step: StepSpec, tool: str, arguments: dict, ok: bool
+    ) -> None:
+        """Add a proxied call to the step's receipt and emit it as its own trace event.
+
+        Both, deliberately: the per-call event preserves ordering and timing, while the
+        list attached to the step's ruling is what makes the ruling self-contained —
+        before-state, calls, after-state in one record.
+        """
+        call = tool_call_record(tool, arguments, ok=ok)
+        self._step_tool_calls.append(call)
+        self.engine.trace.event(step_id=step.id, status="tool_call", **call)
 
     def _trace_refusal(self, tool: str, reason: str, step: StepSpec | None = None) -> None:
         self.engine.trace.event(

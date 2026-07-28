@@ -43,13 +43,21 @@ def _coerce(value: Any) -> Any:
 
 
 class OtlpTraceSink:
-    def __init__(self, service_name: str = "laufwise", endpoint: str | None = None) -> None:
+    def __init__(
+        self,
+        service_name: str = "laufwise",
+        endpoint: str | None = None,
+        context: dict[str, Any] | None = None,
+    ) -> None:
+        """`context` mirrors JsonlTraceSink: run identity stamped onto every span, so a run
+        is reconstructable in the backend rather than only in the local episode file."""
         if not _OTEL_AVAILABLE:
             raise ImportError(
                 "OtlpTraceSink requires the opentelemetry packages. "
                 "Install with: pip install 'laufwise[otel]'"
             )
 
+        self.context = dict(context or {})
         resource = Resource.create({"service.name": service_name})
         self._provider = TracerProvider(resource=resource)
         exporter = OTLPSpanExporter(endpoint=endpoint) if endpoint else OTLPSpanExporter()
@@ -60,7 +68,7 @@ class OtlpTraceSink:
         """Drop-in match for the TraceSink protocol — no positional span name."""
         span = self._tracer.start_span(f"laufwise.step.{fields.get('status', 'event')}")
         span.set_attribute("gen_ai.system", "laufwise")  # source marker for GenAI backends
-        for key, value in fields.items():
+        for key, value in {**self.context, **fields}.items():
             if value is None:
                 continue
             span.set_attribute(f"laufwise.{key}", _coerce(value))
