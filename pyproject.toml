@@ -37,6 +37,16 @@ otel = [
   "opentelemetry-exporter-otlp-proto-http>=1.20",
 ]
 mcp = ["mcp>=1.2"]
+# Test-harness-only pin, NOT a runtime constraint. tests/test_mcp_server.py drives the step
+# session over two real in-memory MCP sessions, which needs `mcp.server.fastmcp.FastMCP` and
+# `mcp.shared.memory.create_connected_server_and_client_session` — both removed in mcp 2.0
+# (FastMCP became mcp.server.mcpserver; the helper became create_client_server_memory_streams).
+# The runtime code is 2.0-clean: every API laufwise/mcp/server.py uses (mcp.types,
+# server.lowlevel.Server, server.stdio.stdio_server, ClientSession, StdioServerParameters,
+# client.stdio.stdio_client) is still present in 2.0, so the `mcp` extra above stays
+# permissive — pinning users out of 2.0 would be false metadata. Porting the harness to the
+# 2.0 API is separate work; until then CI installs this so the session tests still run.
+test-mcp = ["mcp<2"]
 
 [project.urls]
 Homepage = "https://github.com/dfadeeff/laufwise"

@@ -11,7 +11,15 @@ import json
 
 import pytest
 
-mcp = pytest.importorskip("mcp")
+# Guard the submodule this harness actually needs, not just the top-level package. mcp 2.0
+# removed FastMCP (and mcp.shared.memory's in-memory session helper), so an `importorskip("mcp")`
+# succeeded and then the harness imports below blew up as a COLLECTION ERROR — a red suite that
+# says nothing about laufwise. Naming the real requirement turns that into an honest skip.
+# CI pins mcp<2 (see pyproject `test-mcp`) so these tests still run there rather than vanishing.
+mcp = pytest.importorskip(
+    "mcp.server.fastmcp",
+    reason="MCP session harness requires FastMCP, removed in mcp 2.0 (CI pins mcp<2)",
+)
 
 from mcp.server.fastmcp import FastMCP  # noqa: E402
 from mcp.shared.memory import create_connected_server_and_client_session  # noqa: E402

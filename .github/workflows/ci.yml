@@ -18,7 +18,8 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install (all extras)
-        run: pip install -e ".[dev,mcp]"
+        # test-mcp pins mcp<2 so the in-memory session harness resolves; see pyproject.
+        run: pip install -e ".[dev,mcp,test-mcp]"
       - name: Lint
         run: ruff check .
       - name: Test
