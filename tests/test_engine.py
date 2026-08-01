@@ -201,6 +201,114 @@ def test_state_unavailable_is_first_class_halt(tmp_path):
     assert len(results) == 1  # run halted
 
 
+# --- the receipt: before-state -> tool calls -> after-state ---------------------------
+# ARCHITECTURE §1.7: the episode tuple is (step_id, state_hash, decision, tool_calls,
+# outcome). A ruling alone proves the harness had an opinion; the evidence proves what the
+# action did to the system of record.
+
+
+def test_ok_records_both_hashes_and_the_tool_call(tmp_path):
+    trace_path = tmp_path / "ep.jsonl"
+    spec = load_runbook(RUNBOOK)
+    provider = MemoryStateProvider(_fixture("complete.json"))
+    eng = _engine(trace_path, provider)
+    results = eng.run(spec)
+    eng.trace.close()
+
+    write = results[-1]
+    assert write.status is StepStatus.OK
+    # before -> after is the chain. The write changed state, so the hashes must differ:
+    # one hash alone could not show that anything happened.
+    assert write.state_hash_before and write.state_hash_after
+    assert write.state_hash_before != write.state_hash_after
+    assert [c["tool"] for c in write.tool_calls] == ["create_vendor_draft"]
+    assert write.tool_calls[0]["ok"] is True
+    assert len(write.tool_calls[0]["args_hash"]) == 16
+
+
+def test_arguments_are_hashed_not_stored_verbatim(tmp_path):
+    # The episode log must not become a place PII/credentials accumulate. `canary` is an
+    # obviously-synthetic personal detail: it goes in as a tool argument and must not come
+    # out anywhere in the trace file. Deliberately NOT shaped like a credential — a
+    # `key=VALUE` string containing "secret" or "token" trips repository secret scanners,
+    # and a test fixture should not cost anyone an incident triage.
+    canary = "Ada Lovelace, 12 Example Street"
+    step = StepSpec(
+        id="s1",
+        tools=["create_rec"],
+        execute=ExecuteSpec(adapter="sim", tool="create_rec", args={"note": canary},
+                            effect={"rec": {"id": 1}}),
+        postconditions=[CheckSpec(expr="rec.exists == true")],
+    )
+    spec = _single_step_spec(step, state={"rec": StateBinding(provider="memory")})
+    trace_path = tmp_path / "ep.jsonl"
+    provider = MemoryStateProvider({"rec": None})
+    eng = _engine(trace_path, provider)
+    eng.run(spec)
+    eng.trace.close()
+
+    raw = trace_path.read_text()
+    assert canary not in raw
+    assert "args_hash" in raw
+
+
+def test_block_records_the_gate_state_and_no_tool_calls(tmp_path):
+    spec = load_runbook(RUNBOOK)
+    eng = _engine(tmp_path / "ep.jsonl", MemoryStateProvider(_fixture("missing_tax_id.json")))
+    results = eng.run(spec)
+    eng.trace.close()
+
+    blocked = results[-1]
+    assert blocked.status is StepStatus.BLOCK
+    assert blocked.state_hash_before is not None  # the evidence for refusing
+    assert blocked.state_hash_after is None  # nothing ran, so there is no after-state
+    assert blocked.tool_calls == []
+
+
+def test_trace_lines_carry_run_context_and_timestamp(tmp_path):
+    trace_path = tmp_path / "ep.jsonl"
+    spec = load_runbook(RUNBOOK)
+    provider = MemoryStateProvider(_fixture("complete.json"))
+    eng = LocalEngine(
+        provider=provider,
+        evaluator=BuiltinEvaluator(),
+        trace=JsonlTraceSink(trace_path, context={"run_id": "run-abc", "runbook": spec.runbook}),
+        approval=AutoApprovalGate(),
+        adapter=SimulatedAdapter(provider),
+    )
+    eng.run(spec)
+    eng.trace.close()
+
+    lines = [json.loads(line) for line in trace_path.read_text().splitlines()]
+    assert all(line["run_id"] == "run-abc" for line in lines)
+    assert all(line["runbook"] == "vendor_onboarding" for line in lines)
+    # A line has to say when it was recorded, or it cannot serve as an audit record.
+    assert all(line["ts"].startswith("20") for line in lines)
+    assert lines[-1]["state_hash_before"] != lines[-1]["state_hash_after"]
+
+
+def test_refused_tool_attempt_is_part_of_the_receipt(tmp_path):
+    # An allowlist that fired is evidence, not a non-event.
+    class _Refusing:
+        def execute(self, step, allowlist):
+            raise ToolNotAllowed("nope")
+
+    step = StepSpec(
+        id="s1",
+        tools=["create_rec"],
+        execute=ExecuteSpec(adapter="x", tool="create_rec"),
+    )
+    spec = _single_step_spec(step, state={"rec": StateBinding(provider="memory")})
+    eng = _engine(tmp_path / "ep.jsonl", MemoryStateProvider({"rec": None}), adapter=_Refusing())
+    results = eng.run(spec)
+    eng.trace.close()
+
+    assert results[0].status is StepStatus.BLOCK
+    assert results[0].tool_calls == [
+        {"tool": "create_rec", "args_hash": results[0].tool_calls[0]["args_hash"], "ok": False}
+    ]
+
+
 # --- a broken check rules and traces; it never crashes the run ------------------------
 # Load-time validation (test_loader.py) catches these before a run starts. This is the
 # backstop for the paths it cannot cover: specs built in code, evaluators with different

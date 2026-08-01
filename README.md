@@ -37,6 +37,21 @@ what audit — and the EU AI Act's logging, oversight, and post-market-monitorin
 obligations — actually demand: evidence produced at the moment of action, not
 reconstructed after the incident. Others notarize the claim; laufwise re-checks reality.
 
+One line of the episode log, verbatim:
+
+```json
+{"ts": "2026-07-28T11:59:00.535823+00:00", "run_id": "8451dd3b48c2471b",
+ "runbook": "vendor_onboarding", "runbook_version": 1,
+ "step_id": "prepare_erp_draft", "status": "ok",
+ "state_hash_before": "6f65522061461a01", "state_hash_after": "74232594bdc8bc66",
+ "tool_calls": [{"tool": "create_vendor_draft", "args_hash": "44136fa355b3678a", "ok": true}]}
+```
+
+The two hashes differ, so the write demonstrably changed the system of record — one hash
+could not show that. Tool arguments are recorded as a digest, not verbatim: the audit
+question is *"was this call made with these arguments"*, which a hash answers without the
+episode log becoming a place PII and credentials accumulate.
+
 **4. Drop-in via MCP.** `rh serve <runbook.yaml> --wrap <any-mcp-server>` puts the
 contract between any MCP client (Claude, Cursor, your own agent) and its tools. The agent
 sees only the current step's allowlisted tools, and a step completes only when its
@@ -102,7 +117,8 @@ Every runbook step runs the same enforced loop:
 4. **Execute** -- the agent acts, confined to the allowed tools.
 5. **Postconditions** -- verified against the system of record, not the agent's output.
    If they fail, the outcome is rejected.
-6. **Checkpoint + trace** -- state hash + OTEL spans for replay and observability.
+6. **Checkpoint + trace** -- a receipt per step: the state hash *before*, the tool calls the
+   harness actually saw, and the state hash *after*, appended to the episode log.
 
 The control flow is deterministic Python. The LLM only acts inside step 4.
 

@@ -11,7 +11,15 @@ import json
 
 import pytest
 
-mcp = pytest.importorskip("mcp")
+# Guard the submodule this harness actually needs, not just the top-level package. mcp 2.0
+# removed FastMCP (and mcp.shared.memory's in-memory session helper), so an `importorskip("mcp")`
+# succeeded and then the harness imports below blew up as a COLLECTION ERROR — a red suite that
+# says nothing about laufwise. Naming the real requirement turns that into an honest skip.
+# CI pins mcp<2 (see pyproject `test-mcp`) so these tests still run there rather than vanishing.
+mcp = pytest.importorskip(
+    "mcp.server.fastmcp",
+    reason="MCP session harness requires FastMCP, removed in mcp 2.0 (CI pins mcp<2)",
+)
 
 from mcp.server.fastmcp import FastMCP  # noqa: E402
 from mcp.shared.memory import create_connected_server_and_client_session  # noqa: E402
@@ -146,6 +154,35 @@ def test_lying_tool_is_rejected_and_session_halts(tmp_path):
         assert "halted" in refused["refused"]
 
     asyncio.run(_drive(record, honest=False, scenario=scenario))
+
+
+def test_proxied_calls_land_in_the_receipt_not_just_refusals(tmp_path):
+    # Tracing only refusals would leave the audit record able to show what the harness
+    # stopped but not what it let through. "What the agent actually did" is the half a
+    # receipt exists to prove.
+    trace_path = tmp_path / "ep.jsonl"
+    record = {"slot": {"free": True}, "event": None, "_trace_path": trace_path}
+
+    async def scenario(client, runbook):
+        await client.call_tool(BEGIN_STEP, {})
+        await client.call_tool("create_event", {"title": "Interview c-1"})
+        await client.call_tool("delete_event", {"title": "x"})  # not allowlisted -> refused
+        await client.call_tool(COMPLETE_STEP, {})
+
+        ruling = runbook.results[-1]
+        assert [c["tool"] for c in ruling.tool_calls] == ["create_event"]
+        assert ruling.state_hash_before and ruling.state_hash_after
+        assert ruling.state_hash_before != ruling.state_hash_after  # the write landed
+
+    asyncio.run(_drive(record, honest=True, scenario=scenario))
+
+    events = [json.loads(line) for line in trace_path.read_text().splitlines()]
+    by_status = {e["status"] for e in events}
+    assert "tool_call" in by_status  # the allowed call
+    assert "refused" in by_status  # and the blocked one
+    allowed = next(e for e in events if e["status"] == "tool_call")
+    assert allowed["tool"] == "create_event"
+    assert "Interview c-1" not in trace_path.read_text()  # args hashed, never verbatim
 
 
 def test_reject_with_goto_routes_session_instead_of_halting(tmp_path):

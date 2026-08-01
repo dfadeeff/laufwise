@@ -133,7 +133,14 @@ runbook ("guard mode"), explicitly the weaker per-call contract.
 Langfuse is **observability-only** — it cannot resume a run. Temporal can resume but only when
 you adopt its execution model. We want deterministic replay **even in pure-local mode**, so a
 run is recorded as an **episode log**: an append-only sequence of
-`(step_id, state_snapshot_hash, decision, tool_calls, outcome)`. `rh replay` re-drives the
+`(ts, run_id, runbook, runbook_version, step_id, status, reason, expr, blocked_tool,
+state_hash_before, state_hash_after, tool_calls)`. Both hashes, because before→action→after
+is the chain a receipt has to show — one hash cannot demonstrate that anything changed.
+`ts`/`run_id` are stamped by the **TraceSink**, not the engine: the engine stays a
+deterministic function of (spec, state) so replay re-drives it to identical rulings, while
+wall-clock and run identity stay with the recorder. Tool arguments are recorded as a digest
+(`args_hash`), never verbatim — the audit question is "was this call made with these
+arguments", and a hash answers it without the log accumulating PII or credentials. `rh replay` re-drives the
 *same deterministic engine* over the recorded decisions and asserts identical control flow.
 This gives replay for free, independent of the durability backend.
 

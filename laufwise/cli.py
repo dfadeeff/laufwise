@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from pathlib import Path
 
 import click
@@ -33,6 +34,17 @@ def _next_episode(run_dir: Path) -> Path:
     run_dir.mkdir(parents=True, exist_ok=True)
     n = len(list(run_dir.glob("episode_*.jsonl"))) + 1
     return run_dir / f"episode_{n:03d}.jsonl"
+
+
+def _run_context(spec) -> dict:
+    """Identity stamped onto every trace event. Minted here, at the composition root: the
+    engine stays a deterministic function of (spec, state), so replay re-drives it and gets
+    the same rulings, while the run's wall-clock identity lives with the recorder."""
+    return {
+        "run_id": uuid.uuid4().hex[:16],
+        "runbook": spec.runbook,
+        "runbook_version": spec.version,
+    }
 
 
 def _load_or_exit(runbook: str):
@@ -88,7 +100,7 @@ def run(runbook: str, case_path: str, output_dir: str) -> None:
     # Bindings choose their provider; the case fixture's _params template http URLs.
     provider, state_provider = _build_state_provider(spec, fixture)
     trace_path = _next_episode(Path(output_dir) / spec.runbook)
-    trace = JsonlTraceSink(trace_path)
+    trace = JsonlTraceSink(trace_path, context=_run_context(spec))
     engine = LocalEngine(
         provider=state_provider,
         evaluator=BuiltinEvaluator(),
@@ -169,7 +181,7 @@ def serve(runbook: str, case_path: str | None, wrap_commands: tuple[str, ...], o
     _, state_provider = _build_state_provider(spec, fixture)
 
     trace_path = _next_episode(Path(output_dir) / spec.runbook)
-    trace = JsonlTraceSink(trace_path)
+    trace = JsonlTraceSink(trace_path, context=_run_context(spec))
     engine = LocalEngine(
         provider=state_provider,
         evaluator=BuiltinEvaluator(),
